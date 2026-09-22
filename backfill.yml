@@ -1,0 +1,57 @@
+name: backfill
+
+on:
+  workflow_dispatch:   # Actions 탭에서 수동 실행 (처음 1번, 이후 한 달에 1번 정도)
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monitor        # 매시간 모니터와 동시에 돌지 않도록 같은 대기열 사용
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 섹터 데이터 불러오기 (모니터가 받아둔 것)
+        uses: actions/cache/restore@v4
+        with:
+          path: cache
+          key: monitor-cache-${{ github.run_id }}
+          restore-keys: monitor-cache-
+
+      - name: 지난번 받은 과거 데이터 불러오기
+        uses: actions/cache/restore@v4
+        with:
+          path: histcache
+          key: backfill-hist-${{ github.run_id }}
+          restore-keys: backfill-hist-
+
+      - name: 과거 데이터 받기 + 백테스트
+        env:
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: python backfill.py
+
+      - name: 과거 데이터 보관
+        if: always() && hashFiles('histcache/hist.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: histcache
+          key: backfill-hist-${{ github.run_id }}
+
+      - name: 결과 저장
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data
+          git commit -m "백테스트 $(date -u +'%Y-%m-%d')" || echo "변경 없음"
+          git pull --rebase
+          git push
