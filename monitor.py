@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""섹터 모니터 v2.0 — Team All Street · Made by Tyler
-(개발 당시 v3.1 = 모니터 1.0. 버전 규칙: 코인을 고르는 규칙이 바뀌면 큰 업데이트 x.0, 화면·표시만 바뀌면 작은 업데이트 x.1)
+"""섹터 모니터 v3.0 — Project Charon for Team All Street · Made by Tyler
 
-목표: 강한 섹터 안에서 '덜 올랐지만 망가지지 않았고, 움직이기 시작한' 코인을 강조한다.
-- 1시간마다 실행. 데이터마다 갱신 주기를 달리해 무료 한도 안에서 운영.
-    BTC·선물(OI·펀딩)      : 1시간
-    섹터별 코인(CoinGecko) : 4시간
-    체인·수수료(DefiLlama) : 1일
-- 결과 페이지: site/index.html (GitHub Pages로 배포)
-- 기록(성적표 등): data/*.json (저장소에 커밋)
-- 다시 받을 수 있는 큰 데이터: cache/*.json (GitHub 캐시에 보관)
-외부 라이브러리 없음.
+2시간마다 GitHub Actions에서 실행:
+1. CoinGecko: 시총 상위 1000개 가격(매 실행), 섹터 구성(하루 1번), 전체 시총·도미넌스(매 실행)
+2. 거래소 일봉(Bitget → OKX → CoinGecko 순): 20·60·100·200일선을 트레이딩뷰와 같은 방식으로 계산
+3. 선물(Hyperliquid·Bitget·OKX): 펀딩·OI → 숏 스퀴즈 / 업비트·빗썸: 거래대금·상장 후보
+4. 목록: Top 3 · 초입 후보 · 소형 도전 · 눌림목 · 20일선 재돌파 · 상장 후보 · 숏 스퀴즈
+5. 시장: 알트 사이클 8단계(팀 리더 조언), 알트시즌 지수, 체급별 흐름, 시장 폭
 """
 import datetime as dt
 import html
 import json
+import math
 import os
 import random
 import re
@@ -24,25 +21,26 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-# ═════════════════════════ 버전 ═════════════════════════
-VERSION = "2.0"
-RELEASED = "2026-09-23"
-TEAM, AUTHOR = "Team All Street", "Tyler"
+VERSION = "3.0"
+RELEASED = "2026-09-24"
+CREDIT = "Made by Tyler"
 SUBTITLE = "Project Charon for Team All Street"
 VERSION_RULE = "큰 업데이트(x.0)는 코인을 고르는 규칙이 바뀐 것, 작은 업데이트(x.1)는 화면·표시만 바뀐 것입니다. 실전 성적은 큰 버전별로 따로 집계합니다."
 CHANGELOG = [
+    ("3.0", "2026-09-24", "큰 업데이트", [
+        "탭 화면(순위·초입 후보·소형 도전·눌림목·상장·섹터·시장·성적표·데이터 점검), 항상 다크 모드, 2시간마다 갱신",
+        "덜 오름 기준을 섹터 안 표준점수(중앙값·MAD)로 변경. Top 3는 시총 순, 한 번 들어오면 느슨한 기준까지 유지",
+        "평균가 위·거래량 급증을 필수 조건에서 제외 (2.0 백테스트에서 성적을 낮춤). 7일 +15%·30일 +40% 상한",
+        "이평선을 거래소 일봉(마감 봉 + 현재가, 트레이딩뷰 방식)으로 계산. 20·60·100·200일선",
+        "눌림목(이미 오른 코인의 조정), 20일선 재돌파(반등·전환), 숏 스퀴즈 순위, 상장 후보(업비트 BTC·USDT 마켓만·빗썸만)",
+        "팀 리더 조언 반영: 알트 사이클 8단계, 익절 구간·꺾임 주의 배지, 시장 폭, 알트시즌 지수(자체 계산)",
+        "체급(메이저·대형·중형·마이너)별 흐름, 섹터·체급·상승장 대장 코인, 로빈후드 관찰 섹터",
+        "상위 20개 거래소 중 상장 수, 업비트 투자유의 표시",
+        "2.0의 날짜 섞임 버그 수정 (일봉 기준 UTC 0시로 통일)",
+        "DefiLlama 섹터 신호·CMC 코인별 칩·섹터 지도·비교 차트·컨트랙트 주소 제거",
+    ]),
     ("2.0", "2026-09-23", "큰 업데이트", [
-        "강조 대상 시총 하한 $300M. $70M~300M은 '소형(참고)'으로 따로 보여주고 성적도 따로 기록",
-        "상장 기준을 Bitget·OKX·Binance·업비트로 변경 (소형은 2곳 이상). DEX에서만 거래되는 코인과 Hyperliquid 전용 코인 제외",
-        "새 목록 '상승 초입 후보(실험)': 섹터 동조, 거래량 증가 추세, 하락 추세 돌파, 사용량 증가, 숏 스퀴즈 준비, 업비트 관심 중 2개 이상. 성적 따로 기록",
-        "CoinMarketCap 교차 확인 추가 (가격·거래량 불일치 표시)",
-        "코인마다 조건 통과·미통과 칩, 7일 미니 차트, 체인·컨트랙트 주소, 상장 거래소 표시",
-        "섹터 지도(원형 그래프): 초입·개선·주의·과열을 색으로 구분, 누르면 해당 코인으로 이동",
-        "화면 폭에 따라 자동 배치: 휴대폰은 한 줄, PC는 두 칸 (오른쪽에 지도·비교 차트 고정)",
-        "백테스트에 조건별 성적, 반대 전략 비교, 앞·뒤 기간 검증, 소형·실험 목록 성적 추가. 합격 조건에 중앙값 추가",
-        "실전 성적표를 큰 버전별로 따로 집계",
-        "Bybit·Binance 선물 데이터 수집 중단 (GitHub 서버 IP 차단). 선물 데이터는 Hyperliquid·Bitget·OKX",
-        "버전·변경 이력·제작 표기, Project Charon for Team All Street 부제",
+        "시총 하한 $300M, 소형(참고)·상승 초입(실험) 목록, CMC 교차 확인, 조건 칩, 섹터 지도, 백테스트 세부표",
     ]),
     ("1.0", "2026-09-22", "첫 버전", [
         "24개 섹터 자금흐름 판정, 지금 볼 것·관심 목록, 비교 차트, 실전 성적표, 1년 백테스트, 텔레그램 알림 (개발 당시 v3.1)",
@@ -56,87 +54,87 @@ def major(v):
 
 # ═════════════════════════ 설정 ═════════════════════════
 KST = dt.timezone(dt.timedelta(hours=9))
+UTC = dt.timezone.utc
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(ROOT, "data")
 CACHE_DIR = os.path.join(ROOT, "cache")
 SITE_DIR = os.path.join(ROOT, "site")
 MOCK = os.environ.get("MOCK") == "1"
-NOW_TS = int(os.environ.get("NOW_TS") or time.time())  # 테스트용 시간 조작
+NOW_TS = int(os.environ.get("NOW_TS") or time.time())
 CG_KEY = os.environ.get("COINGECKO_API_KEY", "").strip()
 CMC_KEY = os.environ.get("CMC_API_KEY", "").strip()
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+TG_INVITE = os.environ.get("TELEGRAM_INVITE_URL", "").strip()   # 알림방 입장 버튼 (없으면 버튼 숨김)
 PAGE_URL = os.environ.get("PAGE_URL", "").strip()
 
-# 섹터: CoinGecko 카테고리 ID가 바뀌면 names로 자동 재탐색
 SECTORS = [
     # 체인 생태계
-    {"key": "ETH", "name": "이더리움", "kind": "체인", "cg": "ethereum-ecosystem", "names": ["Ethereum Ecosystem"], "llama": "Ethereum", "dex": "ethereum"},
-    {"key": "SOL", "name": "솔라나", "kind": "체인", "cg": "solana-ecosystem", "names": ["Solana Ecosystem"], "llama": "Solana", "dex": "solana"},
-    {"key": "BNB", "name": "BNB체인", "kind": "체인", "cg": "binance-smart-chain", "names": ["BNB Chain Ecosystem", "Binance Smart Chain Ecosystem"], "llama": "BSC", "dex": "bsc"},
-    {"key": "BASE", "name": "베이스", "kind": "체인", "cg": "base-ecosystem", "names": ["Base Ecosystem"], "llama": "Base", "dex": "base"},
-    {"key": "ARB", "name": "아비트럼", "kind": "체인", "cg": "arbitrum-ecosystem", "names": ["Arbitrum Ecosystem"], "llama": "Arbitrum", "dex": "arbitrum"},
-    {"key": "SUI", "name": "수이", "kind": "체인", "cg": "sui-ecosystem", "names": ["Sui Ecosystem"], "llama": "Sui", "dex": "sui"},
-    {"key": "AVAX", "name": "아발란체", "kind": "체인", "cg": "avalanche-ecosystem", "names": ["Avalanche Ecosystem"], "llama": "Avalanche", "dex": "avalanche"},
-    {"key": "TON", "name": "톤", "kind": "체인", "cg": "ton-ecosystem", "names": ["TON Ecosystem", "The Open Network Ecosystem", "Toncoin Ecosystem"], "llama": "TON", "dex": "ton"},
-    {"key": "TRX", "name": "트론", "kind": "체인", "cg": "tron-ecosystem", "names": ["Tron Ecosystem", "TRON Ecosystem"], "llama": "Tron", "dex": "tron"},
-    {"key": "APT", "name": "앱토스", "kind": "체인", "cg": "aptos-ecosystem", "names": ["Aptos Ecosystem"], "llama": "Aptos", "dex": "aptos"},
-    {"key": "HYPE", "name": "하이퍼리퀴드", "kind": "체인", "cg": "hyperliquid-ecosystem", "names": ["Hyperliquid Ecosystem", "HyperEVM Ecosystem"], "llama": "Hyperliquid L1", "dex": "hyperliquid-l1"},
-    {"key": "BTCE", "name": "비트코인 생태계", "kind": "체인", "cg": "bitcoin-ecosystem", "names": ["Bitcoin Ecosystem"], "llama": None, "dex": None},
+    {"key": "ETH", "name": "이더리움", "cg": "ethereum-ecosystem", "names": ["Ethereum Ecosystem"]},
+    {"key": "SOL", "name": "솔라나", "cg": "solana-ecosystem", "names": ["Solana Ecosystem"]},
+    {"key": "BNB", "name": "BNB체인", "cg": "binance-smart-chain", "names": ["BNB Chain Ecosystem", "Binance Smart Chain Ecosystem"]},
+    {"key": "BASE", "name": "베이스", "cg": "base-ecosystem", "names": ["Base Ecosystem"]},
+    {"key": "ARB", "name": "아비트럼", "cg": "arbitrum-ecosystem", "names": ["Arbitrum Ecosystem"]},
+    {"key": "SUI", "name": "수이", "cg": "sui-ecosystem", "names": ["Sui Ecosystem"]},
+    {"key": "AVAX", "name": "아발란체", "cg": "avalanche-ecosystem", "names": ["Avalanche Ecosystem"]},
+    {"key": "TON", "name": "톤", "cg": "ton-ecosystem", "names": ["TON Ecosystem", "The Open Network Ecosystem", "Toncoin Ecosystem"]},
+    {"key": "TRX", "name": "트론", "cg": "tron-ecosystem", "names": ["Tron Ecosystem", "TRON Ecosystem"]},
+    {"key": "APT", "name": "앱토스", "cg": "aptos-ecosystem", "names": ["Aptos Ecosystem"]},
+    {"key": "HYPE", "name": "하이퍼리퀴드", "cg": "hyperliquid-ecosystem", "names": ["Hyperliquid Ecosystem", "HyperEVM Ecosystem"]},
+    {"key": "BTCE", "name": "비트코인 생태계", "cg": "bitcoin-ecosystem", "names": ["Bitcoin Ecosystem"]},
     # 내러티브
-    {"key": "MEME", "name": "밈", "kind": "내러티브", "cg": "meme-token", "names": ["Meme"]},
-    {"key": "AI", "name": "AI", "kind": "내러티브", "cg": "artificial-intelligence", "names": ["Artificial Intelligence (AI)", "Artificial Intelligence"]},
-    {"key": "AGENT", "name": "AI 에이전트", "kind": "내러티브", "cg": "ai-agents", "names": ["AI Agents"]},
-    {"key": "RWA", "name": "실물자산", "kind": "내러티브", "cg": "real-world-assets-rwa", "names": ["Real World Assets (RWA)"]},
-    {"key": "DEPIN", "name": "DePIN", "kind": "내러티브", "cg": "depin", "names": ["DePIN"]},
-    {"key": "DEFI", "name": "디파이", "kind": "내러티브", "cg": "decentralized-finance-defi", "names": ["Decentralized Finance (DeFi)"]},
-    {"key": "PERP", "name": "선물 DEX", "kind": "내러티브", "cg": "perpetuals", "names": ["Perpetuals"]},
-    {"key": "L2", "name": "레이어2", "kind": "내러티브", "cg": "layer-2", "names": ["Layer 2 (L2)"]},
-    {"key": "GAME", "name": "게임", "kind": "내러티브", "cg": "gaming", "names": ["Gaming (GameFi)", "Gaming"]},
-    {"key": "PRIV", "name": "프라이버시", "kind": "내러티브", "cg": "privacy-coins", "names": ["Privacy Coins"]},
-    {"key": "RESTAKE", "name": "리스테이킹", "kind": "내러티브", "cg": "restaking", "names": ["Restaking"]},
-    {"key": "PRED", "name": "예측시장", "kind": "내러티브", "cg": "prediction-markets", "names": ["Prediction Markets"]},
+    {"key": "MEME", "name": "밈", "cg": "meme-token", "names": ["Meme"]},
+    {"key": "AI", "name": "AI", "cg": "artificial-intelligence", "names": ["Artificial Intelligence (AI)", "Artificial Intelligence"]},
+    {"key": "AGENT", "name": "AI 에이전트", "cg": "ai-agents", "names": ["AI Agents"]},
+    {"key": "RWA", "name": "실물자산", "cg": "real-world-assets-rwa", "names": ["Real World Assets (RWA)"]},
+    {"key": "DEPIN", "name": "DePIN", "cg": "depin", "names": ["DePIN"]},
+    {"key": "DEFI", "name": "디파이", "cg": "decentralized-finance-defi", "names": ["Decentralized Finance (DeFi)"]},
+    {"key": "PERP", "name": "선물 DEX", "cg": "perpetuals", "names": ["Perpetuals"]},
+    {"key": "L2", "name": "레이어2", "cg": "layer-2", "names": ["Layer 2 (L2)"]},
+    {"key": "GAME", "name": "게임", "cg": "gaming", "names": ["Gaming (GameFi)", "Gaming"]},
+    {"key": "PRIV", "name": "프라이버시", "cg": "privacy-coins", "names": ["Privacy Coins"]},
+    {"key": "RESTAKE", "name": "리스테이킹", "cg": "restaking", "names": ["Restaking"]},
+    {"key": "PRED", "name": "예측시장", "cg": "prediction-markets", "names": ["Prediction Markets"]},
+    # 직접 정한 목록 (CoinGecko 카테고리는 브리지 사본이 섞여 있어 사용하지 않음)
+    {"key": "ROBIN", "name": "로빈후드", "ids": ["cash-cat", "artificial-inu-3", "morpho", "lighter", "uniswap", "dydx-chain"],
+     "native": ["cash-cat", "artificial-inu-3"], "watch": True},
 ]
+# watch=True: 순위·대장만 보여주고 추천을 뽑는 섹터에서는 제외 (코인 수가 적고 한두 코인에 쏠림). 바꾸려면 False
 
 TH = {  # 판정 기준 (숫자만 바꾸면 기준이 바뀜)
-    # 섹터 신호
-    "funding_hot_apr": 40.0, "funding_neutral_apr": 15.0,
-    "stable_in_pct": 1.0, "stable_out_pct": -1.0, "dex_up_pct": 10.0,
-    "breadth_strong": 60.0, "oi_jump_pct": 10.0, "price_flat_pct": 2.0,
-    # 등급
-    "major_rank": 5, "major_mcap": 1e9, "major_venues": 2,
-    "minor_mcap": 70e6, "pick_mcap": 300e6, "small_min_venues": 2, "min_volume": 2e6, "turnover_min": 0.02, "turnover_max": 0.5,
-    "float_min": 0.5, "ath_dd_min": -95.0,
-    # 후보
-    "lag_min": 5.0,         # 섹터 중앙값보다 30일 수익률이 이만큼(%p) 이상 낮아야 '지연'
-    "vol_surge": 1.5,       # 오늘 거래량 / 직전 평균 거래량
-    "coin_funding_max": 40.0,
-    "red_max": 3, "yellow_max": 10, "top_n": 10,
-    "verify_min_samples": 20,
-    # 실험 신호 (상승 초입 후보)
-    "sync_corr": 0.6,        # 섹터 7일 흐름과의 상관계수
-    "vol_trend": 1.3,        # 최근 3일 거래량 / 그 전 평균
-    "break_days": 30,        # 이 기간 최고가 돌파
-    "break_dd": -50.0,       # 고점 대비 이만큼 이상 빠져 있던 코인만
-    "fee_up": 1.3,           # 최근 7일 수수료 / 30일 평균 페이스
-    "squeeze_oi": 5.0,       # 코인 OI 24시간 증가율(%)
-    "upbit_surge": 2.0,      # 업비트 원화 거래대금 / 그 전 평균
-    "exp_min_hits": 2, "exp_max": 10,
-    "xcheck_px": 3.0, "xcheck_vol": 3.0,   # CMC 교차확인: 가격 차이(%), 거래량 배수
+    # 섹터
+    "sec_min": 8, "top_sec": 5, "breadth_min": 55.0,
+    # 기본 거르기
+    "minor_mcap": 70e6, "pick_mcap": 300e6, "min_volume": 1e6, "pick_volume": 5e6, "funding_hot": 40.0,
+    # 덜 오름 (섹터 안 표준점수)
+    "z30": -0.5, "z30_keep": -0.25, "z7": 0.5, "cap30": 40.0, "cap7": 15.0,
+    # 신호
+    "vol_x": 1.3, "upbit_x": 2.0, "sq_oi": 5.0, "sq_short": 55.0,
+    "early_max": 10, "small_max": 8, "list_max": 10,
+    # 눌림목
+    "pull_sec30": 5.0, "pull_c30": 10.0, "pull_hi_max": -8.0, "pull_hi_min": -30.0, "ma_near": 5.0, "near_max": 12,
+    # 20일선 재돌파
+    "reclaim_days": 5, "reclaim_vol": 1.5,
+    # 익절 경보 (팀 리더 조언)
+    "tp_run": 100.0, "tp_near": -10.0, "wave_dd": -25.0, "brk_run": 80.0, "brk_off": -20.0,
 }
-LIST_VENUES = {"Bitget": "bitget", "OKX": "okex", "Binance": "binance", "Upbit": "upbit"}   # 상장 확인 거래소 (CoinGecko 거래소 id)
-USER_VENUES = list(LIST_VENUES)
-EXCHANGES = ["Hyperliquid", "Bitget", "OKX"]   # 선물 데이터(OI·펀딩) 출처. 거래처가 아니라 데이터용. Bybit·Binance 선물은 GitHub 서버(미국) IP 차단
+LIST_VENUES = {"Bitget": "bitget", "OKX": "okex", "Binance": "binance", "Upbit": "upbit"}   # 상장 필터 거래소 (CoinGecko id)
+VENUE_CODE = {"Upbit": "U", "Bitget": "G", "OKX": "O", "Binance": "B"}
+EXCHANGES = ["Hyperliquid", "Bitget", "OKX"]   # 선물 데이터 출처 (Bybit·Binance 선물은 GitHub 서버 IP 차단)
+TIERS = [("메이저", "$10B+", 10e9, 1e30), ("대형", "$1~10B", 1e9, 10e9), ("중형", "$300M~1B", 300e6, 1e9), ("마이너", "$70~300M", 70e6, 300e6)]
 STABLE_SYMS = {"usdt", "usdc", "dai", "usde", "fdusd", "pyusd", "usds", "tusd", "usdd", "frax", "usd1",
-               "rlusd", "susde", "gho", "lusd", "crvusd", "usdx", "eurc", "usdg", "bfusd"}
-EXCLUDE_WORDS = ("wrapped", "staked", "bridged", "liquid staking", "restaked", "wormhole", "binance-peg", "tether", " usd")
-CAT_REFRESH_S = 4 * 3600 - 600
-DAY_REFRESH_S = 24 * 3600 - 600
+               "rlusd", "susde", "gho", "lusd", "crvusd", "usdx", "eurc", "usdg", "bfusd", "jpyc", "xaut", "paxg"}
+EXCLUDE_WORDS = ("wrapped", "staked", "bridged", "liquid staking", "restaked", "wormhole", "binance-peg", "tether", " usd", "tokenized")
+DAY_S = 86400
+MARKET_PAGES = 4          # 시총 상위 250 × 4 = 1000개
+CANDLE_DAYS = 210
+TICKER_BUDGET = 48        # 하루에 새로 확인할 '상위 20개 거래소 상장 수' 코인 수
+CG_CANDLE_BUDGET = 40     # 거래소 일봉이 없는 코인에 CoinGecko 일봉을 받는 하루 한도
 
 
 # ═════════════════════════ 공통 ═════════════════════════
-def get_json(url, method="GET", body=None, headers=None, retries=3):
-    h = {"User-Agent": "sector-monitor/2.0", "Accept": "application/json"}
+def get_json(url, method="GET", body=None, headers=None, retries=3, timeout=60):
+    h = {"User-Agent": "Mozilla/5.0 (sector-monitor/3.0)", "Accept": "application/json"}
     if headers:
         h.update(headers)
     data = None
@@ -146,10 +144,10 @@ def get_json(url, method="GET", body=None, headers=None, retries=3):
     for i in range(retries):
         try:
             req = urllib.request.Request(url, data=data, headers=h, method=method)
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
-            if e.code in (401, 403, 404, 451):
+            if e.code in (400, 401, 403, 404, 451):
                 raise
             if e.code == 429 and i < retries - 1:
                 time.sleep(30 * (i + 1))
@@ -176,15 +174,6 @@ def pct(new, old):
     return (new - old) / old * 100
 
 
-def f_usd_plain(v):
-    if not v:
-        return "—"
-    for unit, div in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
-        if abs(v) >= div:
-            return f"${v / div:,.1f}{unit}".replace(".0", "")
-    return f"${v:,.0f}"
-
-
 def med(xs):
     xs = [x for x in xs if x is not None]
     return statistics.median(xs) if xs else None
@@ -204,45 +193,69 @@ def save(path, obj):
         json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
 
 
-def downsample(xs, n=42):
-    xs = [x for x in (xs or []) if x is not None]
-    if len(xs) <= n:
-        return xs
-    step = (len(xs) - 1) / (n - 1)
-    return [xs[round(i * step)] for i in range(n)]
+def rnd6(x):
+    return None if x is None else float(f"{x:.6g}")
 
 
-# ═════════════════════════ 수집: CoinGecko ═════════════════════════
+def utc_day(ts):
+    return dt.datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%d")
+
+
 NOTES = []
 _KEY = {"ok": bool(CG_KEY)}
+CALLS = {"cg": 0}
 
 
 def cg(path):
     url = "https://api.coingecko.com/api/v3" + path
+    CALLS["cg"] += 1
     try:
         res = get_json(url, headers={"x-cg-demo-api-key": CG_KEY} if _KEY["ok"] else {})
     except urllib.error.HTTPError as e:
         if e.code != 401 or not _KEY["ok"]:
             raise
-        _KEY["ok"] = False   # 키가 거부됨 -> 이번 실행은 키 없이
-        NOTES.append("CoinGecko 키가 거부되어 키 없이 받았습니다(속도 제한이 더 엄격함). Settings → Secrets의 COINGECKO_API_KEY 값을 확인하세요.")
+        _KEY["ok"] = False
+        NOTES.append("CoinGecko 키가 거부되어 키 없이 받았습니다. Settings → Secrets의 COINGECKO_API_KEY 값을 확인하세요.")
         time.sleep(8)
         res = get_json(url)
-    time.sleep(2.5 if _KEY["ok"] else 8)
+    time.sleep(2.2 if _KEY["ok"] else 8)
     return res
 
 
-def fetch_btc():
-    r = cg("/coins/markets?vs_currency=usd&ids=bitcoin&sparkline=true&price_change_percentage=24h,7d,30d")[0]
-    return {"px": r.get("current_price"), "c24": r.get("price_change_percentage_24h_in_currency"),
+# ═════════════════════════ 수집: CoinGecko ═════════════════════════
+def market_row(r):
+    return {"id": r["id"], "sym": (r.get("symbol") or "").upper(), "name": r.get("name") or "",
+            "px": r.get("current_price"), "mc": r.get("market_cap") or 0, "fdv": r.get("fully_diluted_valuation"),
+            "vol": r.get("total_volume") or 0, "dd": r.get("ath_change_percentage"),
+            "c1": r.get("price_change_percentage_24h_in_currency"),
             "c7": r.get("price_change_percentage_7d_in_currency"),
             "c30": r.get("price_change_percentage_30d_in_currency"),
-            "spark": downsample((r.get("sparkline_in_7d") or {}).get("price"))}
+            "c200": r.get("price_change_percentage_200d_in_currency")}
+
+
+def fetch_markets():
+    out = {}
+    for page in range(1, MARKET_PAGES + 1):
+        for r in cg(f"/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}"
+                    "&price_change_percentage=24h,7d,30d,200d"):
+            out[r["id"]] = market_row(r)
+    return out
+
+
+def fetch_markets_ids(ids):
+    out = {}
+    ids = sorted(ids)
+    for i in range(0, len(ids), 200):
+        for r in cg("/coins/markets?vs_currency=usd&per_page=250&price_change_percentage=24h,7d,30d,200d&ids="
+                    + ",".join(ids[i:i + 200])):
+            out[r["id"]] = market_row(r)
+    return out
 
 
 def fetch_global():
     g = cg("/global")["data"]
-    return {"btc_dom": g["market_cap_percentage"].get("btc")}
+    p = g.get("market_cap_percentage") or {}
+    return {"total": (g.get("total_market_cap") or {}).get("usd"), "btc": p.get("btc"), "eth": p.get("eth")}
 
 
 def fetch_catlist():
@@ -253,6 +266,8 @@ def resolve_ids(catlist):
     out, missing = {}, []
     lower = {v.lower(): k for k, v in catlist.items()}
     for s in SECTORS:
+        if "cg" not in s:
+            continue
         cid = s["cg"] if s["cg"] in catlist else next((lower[n.lower()] for n in s["names"] if n.lower() in lower), None)
         if cid:
             out[s["key"]] = cid
@@ -261,42 +276,14 @@ def resolve_ids(catlist):
     return out, missing
 
 
-def fetch_category(cid):
-    rows = cg(f"/coins/markets?vs_currency=usd&category={cid}&order=market_cap_desc&per_page=250&page=1"
-              "&sparkline=true&price_change_percentage=1h,24h,7d,30d")
-    out = []
-    for r in rows:
-        out.append({"id": r["id"], "sym": (r.get("symbol") or "").upper(), "name": r.get("name") or "",
-                    "px": r.get("current_price"), "mc": r.get("market_cap") or 0, "fdv": r.get("fully_diluted_valuation"),
-                    "vol": r.get("total_volume") or 0, "dd": r.get("ath_change_percentage"),
-                    "c1h": r.get("price_change_percentage_1h_in_currency"),
-                    "c24": r.get("price_change_percentage_24h_in_currency"),
-                    "c7": r.get("price_change_percentage_7d_in_currency"),
-                    "c30": r.get("price_change_percentage_30d_in_currency"),
-                    "spark": downsample((r.get("sparkline_in_7d") or {}).get("price"))})
-    return out
-
-
-PLAT_KO = {"ethereum": "이더리움", "binance-smart-chain": "BNB체인", "solana": "솔라나", "base": "베이스",
-           "arbitrum-one": "아비트럼", "sui": "수이", "avalanche": "아발란체", "the-open-network": "톤",
-           "tron": "트론", "aptos": "앱토스", "hyperevm": "하이퍼EVM", "hyperliquid": "하이퍼리퀴드",
-           "polygon-pos": "폴리곤", "optimistic-ethereum": "옵티미즘", "sonic": "소닉", "near-protocol": "니어"}
-SEC_PLAT = {"ETH": "ethereum", "SOL": "solana", "BNB": "binance-smart-chain", "BASE": "base", "ARB": "arbitrum-one",
-            "SUI": "sui", "AVAX": "avalanche", "TON": "the-open-network", "TRX": "tron", "APT": "aptos", "HYPE": "hyperevm"}
-
-
-def fetch_platforms(ids):
-    """코인별 체인·컨트랙트 주소. 체인 위 토큰이 아닌 메인넷 코인은 빈 dict"""
-    out = {}
-    for r in cg("/coins/list?include_platform=true"):
-        if r.get("id") in ids:
-            out[r["id"]] = {k: v for k, v in (r.get("platforms") or {}).items() if k and v}
-    return out
+def fetch_category_ids(cid):
+    rows = cg(f"/coins/markets?vs_currency=usd&category={cid}&order=market_cap_desc&per_page=250&page=1")
+    return [r["id"] for r in rows if (r.get("market_cap") or 0) >= TH["minor_mcap"]]
 
 
 def fetch_listing(ex_id, max_pages=25):
-    """거래소에 상장된 코인(CoinGecko id) 목록과 심볼->id 매핑. 같은 심볼의 가짜 토큰과 섞이지 않도록 id로 확인"""
-    ids, sym = set(), {}
+    """거래소에 상장된 코인(CoinGecko id). 같은 심볼의 가짜 토큰과 섞이지 않도록 id로 확인"""
+    ids, krw = set(), {}
     for page in range(1, max_pages + 1):
         rows = cg(f"/exchanges/{ex_id}/tickers?page={page}").get("tickers") or []
         for t in rows:
@@ -304,27 +291,43 @@ def fetch_listing(ex_id, max_pages=25):
                 continue
             ids.add(t["coin_id"])
             if t.get("target") == "KRW":
-                sym[(t.get("base") or "").upper()] = t["coin_id"]
+                krw[(t.get("base") or "").upper()] = t["coin_id"]
         if len(rows) < 100:
             break
-    return {"ids": sorted(ids), "krw": sym}
+    return {"ids": sorted(ids), "krw": krw}
 
 
-def fetch_upbit_krw(krw_map):
-    """업비트 원화 마켓 24시간 거래대금(원) -> CoinGecko id"""
-    markets = [m["market"] for m in get_json("https://api.upbit.com/v1/market/all?isDetails=false") if m["market"].startswith("KRW-")]
-    out = {}
-    for i in range(0, len(markets), 100):
-        for t in get_json("https://api.upbit.com/v1/ticker?markets=" + ",".join(markets[i:i + 100])):
-            cid = krw_map.get(t["market"].split("-", 1)[1])
-            if cid:
-                out[cid] = fl(t.get("acc_trade_price_24h"))
-        time.sleep(0.3)
-    return out
+def fetch_top_exchanges(n=20):
+    rows = cg("/exchanges?per_page=60&page=1")
+    rows = sorted(rows, key=lambda r: -(r.get("trade_volume_24h_btc") or 0))[:n]
+    return [{"id": r["id"], "name": r.get("name") or r["id"]} for r in rows]
+
+
+def fetch_coin_exchanges(cid):
+    rows = cg(f"/coins/{cid}/tickers?page=1&order=volume_desc").get("tickers") or []
+    return sorted({(t.get("market") or {}).get("identifier") for t in rows if not t.get("is_stale")} - {None})
+
+
+def fetch_cg_candles(cid):
+    """거래소 일봉이 없는 코인용. CoinGecko 0시(UTC) 가격 = 전날 종가 → 날짜를 하루 당김"""
+    d = cg(f"/coins/{cid}/market_chart?vs_currency=usd&days={CANDLE_DAYS + 5}&interval=daily")
+    today = utc_day(NOW_TS)
+    byday = {}
+    for ts, v in d.get("prices", []):
+        day = utc_day(ts / 1000 - DAY_S)
+        if day < today:
+            byday[day] = v
+    vol = {}
+    for ts, v in d.get("total_volumes", []):
+        day = utc_day(ts / 1000 - DAY_S)
+        if day < today:
+            vol[day] = v
+    days = sorted(byday)[-CANDLE_DAYS:]
+    return {"src": "CoinGecko 평균가", "tv": None, "d": days, "c": [rnd6(byday[x]) for x in days],
+            "h": [rnd6(byday[x]) for x in days], "v": [rnd6(vol.get(x)) for x in days]}
 
 
 def fetch_cmc():
-    """CoinMarketCap 상위 1500개 (교차 확인용). 심볼 -> [(가격, 24h 거래량, 시총)]"""
     d = get_json("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest?limit=1500&convert=USD",
                  headers={"X-CMC_PRO_API_KEY": CMC_KEY})
     out = {}
@@ -334,63 +337,72 @@ def fetch_cmc():
     return out
 
 
-def xcheck(c, cmc):
-    """CoinGecko 값과 CMC 값 비교. None=확인 불가, (ok, 설명)"""
-    rows = [r for r in cmc.get(c["sym"], []) if r[0] and c["px"] and abs(r[0] / c["px"] - 1) < 0.15]
-    if not rows:
-        return None
-    r = min(rows, key=lambda r: abs((r[2] or 0) - c["mc"]))
-    dpx = abs(r[0] / c["px"] - 1) * 100
-    vr = (r[1] / c["vol"]) if r[1] and c["vol"] else None
-    bad = []
-    if dpx > TH["xcheck_px"]:
-        bad.append(f"가격 {dpx:.1f}% 차이")
-    if vr is not None and not (1 / TH["xcheck_vol"] <= vr <= TH["xcheck_vol"]):
-        bad.append(f"거래량 {vr:.1f}배 차이")
-    return (not bad, " · ".join(bad) or "CMC와 일치")
+def cmc_summary(coins, cmc):
+    ok = bad = 0
+    worst = []
+    for c in coins.values():
+        rows = [r for r in cmc.get(c["sym"], []) if r[0] and c["px"] and abs(r[0] / c["px"] - 1) < 0.15]
+        if not rows:
+            continue
+        r = min(rows, key=lambda r: abs((r[2] or 0) - c["mc"]))
+        d = abs(r[0] / c["px"] - 1) * 100
+        if d > 3:
+            bad += 1
+            worst.append((d, c["sym"]))
+        else:
+            ok += 1
+    return {"ok": ok, "bad": bad, "worst": [f"{s} {d:.1f}%" for d, s in sorted(worst, reverse=True)[:5]]}
 
 
-# ═════════════════════════ 수집: DefiLlama ═════════════════════════
-def fetch_stable(chain):
-    rows = get_json(f"https://stablecoins.llama.fi/stablecoincharts/{urllib.parse.quote(chain)}")
-    vals = [v for v in (r.get("totalCirculatingUSD", {}).get("peggedUSD") for r in rows) if v]
-    return pct(vals[-1], vals[-8])
+# ═════════════════════════ 수집: 거래소 일봉 ═════════════════════════
+def _closed(rows):
+    """[ms, close, high, quote_vol] 중 오늘(UTC) 진행 중인 봉 제외"""
+    today = utc_day(NOW_TS)
+    rows = sorted((r for r in rows if utc_day(r[0] / 1000) < today), key=lambda r: r[0])
+    return rows[-CANDLE_DAYS:]
 
 
-def fetch_tvl(chain):
-    vals = [r["tvl"] for r in get_json(f"https://api.llama.fi/v2/historicalChainTvl/{urllib.parse.quote(chain)}")]
-    return pct(vals[-1], vals[-8])
+def candles_bitget(sym):
+    d = get_json(f"https://api.bitget.com/api/v2/spot/market/candles?symbol={sym}USDT&granularity=1day&limit={CANDLE_DAYS + 5}",
+                 retries=2, timeout=20)
+    rows = [[int(r[0]), fl(r[4]), fl(r[2]), fl(r[6]) if len(r) > 6 else None] for r in d.get("data") or []]
+    return _closed(rows), f"BITGET:{sym}USDT"
 
 
-def fetch_dex(chain):
-    d = get_json(f"https://api.llama.fi/overview/dexs/{chain}?excludeTotalDataChartBreakdown=true")
-    s = [v for _, v in d.get("totalDataChart", [])]
-    return pct(sum(s[-7:]), sum(s[-14:-7])) if len(s) >= 15 else None
+def candles_okx(sym):
+    rows, after = [], ""
+    for _ in range(3):
+        d = get_json(f"https://www.okx.com/api/v5/market/history-candles?instId={sym}-USDT&bar=1Dutc&limit=100{after}",
+                     retries=2, timeout=20)
+        part = d.get("data") or []
+        if not part:
+            break
+        rows += [[int(r[0]), fl(r[4]), fl(r[2]), fl(r[7]) if len(r) > 7 else None] for r in part]
+        after = f"&after={part[-1][0]}"
+        time.sleep(0.12)
+    return _closed(rows), f"OKX:{sym}USDT"
 
 
-def fetch_fees():
-    """코인(CoinGecko id) -> 최근 30일 수수료 합계"""
-    gid = {}
-    for p in get_json("https://api.llama.fi/protocols"):
-        g = p.get("gecko_id")
-        if g:
-            for k in (str(p.get("id")), (p.get("slug") or "").lower(), (p.get("name") or "").lower()):
-                gid[k] = g
-    d = get_json("https://api.llama.fi/overview/fees?excludeTotalDataChart=true&excludeTotalDataChartBreakdown=true")
-    out, out7 = {}, {}
-    for p in d.get("protocols", []):
-        t30, t7 = fl(p.get("total30d")), fl(p.get("total7d"))
-        g = (gid.get(str(p.get("defillamaId"))) or gid.get((p.get("slug") or "").lower())
-             or gid.get((p.get("name") or "").lower()))
-        if g and t30 and t30 > 0:
-            out[g] = out.get(g, 0) + t30
-            out7[g] = out7.get(g, 0) + (t7 or 0)
-    return out, out7
+def pack_candles(rows, tv, src):
+    return {"src": src, "tv": tv, "d": [utc_day(r[0] / 1000) for r in rows], "c": [rnd6(r[1]) for r in rows],
+            "h": [rnd6(r[2]) for r in rows], "v": [rnd6(r[3]) for r in rows]}
+
+
+def fetch_candles(c):
+    """차트 버튼과 같은 거래소·페어의 일봉. 가격이 CoinGecko와 15% 넘게 다르면 다른 코인으로 보고 버림"""
+    sym = re.sub(r"[^A-Z0-9]", "", c["sym"])
+    for fn, name in ((candles_bitget, "Bitget"), (candles_okx, "OKX")):
+        try:
+            rows, tv = fn(sym)
+        except Exception:
+            continue
+        if len(rows) >= 25 and rows[-1][1] and c["px"] and abs(rows[-1][1] / c["px"] - 1) < 0.15:
+            return pack_candles(rows, tv, name)
+    return None
 
 
 # ═════════════════════════ 수집: 선물 거래소 ═════════════════════════
 def norm(sym):
-    """1000PEPEUSDT, SHIB1000USDT, PEPE-USDT-SWAP -> PEPE"""
     s = sym.upper()
     for suf in ("-USDT-SWAP", "USDT"):
         if s.endswith(suf):
@@ -402,24 +414,20 @@ def norm(sym):
     return re.sub(r"10{3,}$", "", s)
 
 
-def add(acc, base, oi, fund_h, px24, px, raw):
+def add(acc, base, oi, fund_h, px, raw):
     if not base or not oi or oi <= 0:
         return
-    r = acc.setdefault(base, {"oi": 0.0, "fw": 0.0, "fn": 0.0, "pw": 0.0, "pn": 0.0, "main": 0.0, "px": None, "raw": None})
+    r = acc.setdefault(base, {"oi": 0.0, "fw": 0.0, "fn": 0.0, "main": 0.0, "px": None, "raw": None})
     r["oi"] += oi
     if fund_h is not None:
         r["fw"] += fund_h * oi
         r["fn"] += oi
-    if px24 is not None:
-        r["pw"] += px24 * oi
-        r["pn"] += oi
     if oi > r["main"]:
         r["main"], r["px"], r["raw"] = oi, px, raw
 
 
 def finalize(acc):
-    return {b: {"oi": r["oi"], "fund_h": r["fw"] / r["fn"] if r["fn"] else None,
-                "px24": r["pw"] / r["pn"] if r["pn"] else None, "px": r["px"], "raw": r["raw"]}
+    return {b: {"oi": r["oi"], "fund_h": r["fw"] / r["fn"] if r["fn"] else None, "px": r["px"], "raw": r["raw"]}
             for b, r in acc.items()}
 
 
@@ -431,7 +439,7 @@ def fetch_hyperliquid(wanted):
         base = name[1:] if name.startswith("k") and name[1:].isupper() else name.upper()
         px, oi = fl(c.get("markPx")), fl(c.get("openInterest"))
         if px and oi:
-            add(acc, base, oi * px, fl(c.get("funding")), pct(px, fl(c.get("prevDayPx"))), px, name)
+            add(acc, base, oi * px, fl(c.get("funding")), px, name)
     return finalize(acc)
 
 
@@ -440,11 +448,10 @@ def fetch_bitget(wanted):
     for r in get_json("https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES")["data"]:
         sym = r["symbol"]
         px = fl(r.get("markPrice")) or fl(r.get("lastPr"))
-        oi, fund, p24 = fl(r.get("holdingAmount")), fl(r.get("fundingRate")), fl(r.get("change24h"))
+        oi, fund = fl(r.get("holdingAmount")), fl(r.get("fundingRate"))
         ivh = fl(r.get("fundingRateInterval")) or 8
         if px and oi:
-            add(acc, norm(sym), oi * px, fund / ivh if fund is not None else None,
-                p24 * 100 if p24 is not None else None, px, sym)
+            add(acc, norm(sym), oi * px, fund / ivh if fund is not None else None, px, sym)
     return finalize(acc)
 
 
@@ -457,444 +464,632 @@ def fetch_okx(wanted):
         base = norm(iid)
         if base not in wanted or not iid.endswith("-USDT-SWAP"):
             continue
-        t = tick.get(iid, {})
-        last = fl(t.get("last"))
+        last = fl(tick.get(iid, {}).get("last"))
         oi = fl(r.get("oiUsd")) or (fl(r.get("oiCcy")) or 0) * (last or 0)
         try:
-            fr = get_json(f"{b}/api/v5/public/funding-rate?instId={iid}")["data"][0]
+            fr = get_json(f"{b}/api/v5/public/funding-rate?instId={iid}", retries=1, timeout=15)["data"][0]
             fund, ft, nft = fl(fr.get("fundingRate")), fl(fr.get("fundingTime")), fl(fr.get("nextFundingTime"))
             ivh = (nft - ft) / 3.6e6 if ft is not None and nft is not None and nft > ft else 8
             fund_h = fund / ivh if fund is not None else None
         except Exception:
             fund_h = None
-        add(acc, base, oi, fund_h, pct(last, fl(t.get("open24h"))), last, iid)
+        add(acc, base, oi, fund_h, last, iid)
         time.sleep(0.12)
     return finalize(acc)
 
 
-def fetch_bybit(wanted):
-    b = "https://api.bybit.com"
-    rows = get_json(b + "/v5/market/tickers?category=linear")["result"]["list"]
-    try:
-        inst = get_json(b + "/v5/market/instruments-info?category=linear&limit=1000")["result"]["list"]
-        iv = {i["symbol"]: fl(i.get("fundingInterval")) / 60 for i in inst if fl(i.get("fundingInterval"))}
-    except Exception:
-        iv = {}
-    acc = {}
-    for r in rows:
-        sym = r["symbol"]
-        fund, p24 = fl(r.get("fundingRate")), fl(r.get("price24hPcnt"))
-        ivh = fl(r.get("fundingIntervalHour")) or iv.get(sym) or 8
-        add(acc, norm(sym), fl(r.get("openInterestValue")), fund / ivh if fund is not None else None,
-            p24 * 100 if p24 is not None else None, fl(r.get("markPrice")), sym)
-    return finalize(acc)
-
-
-def fetch_binance(wanted):
-    b = "https://fapi.binance.com"
-    prem = get_json(b + "/fapi/v1/premiumIndex")
-    try:
-        iv = {r["symbol"]: fl(r.get("fundingIntervalHours")) for r in get_json(b + "/fapi/v1/fundingInfo")}
-    except Exception:
-        iv = {}
-    chg = {r["symbol"]: fl(r.get("priceChangePercent")) for r in get_json(b + "/fapi/v1/ticker/24hr")}
-    acc = {}
-    for r in prem:
-        sym = r["symbol"]
-        base = norm(sym)
-        if base not in wanted:
-            continue
-        oi = fl(get_json(f"{b}/fapi/v1/openInterest?symbol={sym}").get("openInterest"))
-        px, fund = fl(r.get("markPrice")), fl(r.get("lastFundingRate"))
-        if px and oi:
-            add(acc, base, oi * px, fund / (iv.get(sym) or 8) if fund is not None else None, chg.get(sym), px, sym)
-    return finalize(acc)
-
-
-FETCHERS = {k: v for k, v in {"Hyperliquid": fetch_hyperliquid, "Bitget": fetch_bitget, "OKX": fetch_okx,
-                              "Bybit": fetch_bybit, "Binance": fetch_binance}.items() if k in EXCHANGES}
+FETCHERS = {"Hyperliquid": fetch_hyperliquid, "Bitget": fetch_bitget, "OKX": fetch_okx}
 
 
 def px_match(ex_px, cg_px):
-    """같은 심볼의 다른 코인을 걸러내기 위해 가격이 맞는지 확인 (1000배 단위 계약 포함)"""
     if not ex_px or not cg_px:
         return False
     r = ex_px / cg_px
     return any(abs(r / k - 1) < 0.08 for k in (1, 1e3, 1e4, 1e6))
 
 
-def tv_link(venues, coin_id):
-    for ex, fmt in (("Bitget", lambda r: f"BITGET:{r}.P"),
-                    ("OKX", lambda r: "OKX:" + r.replace("-SWAP", "").replace("-", "") + ".P"),
-                    ("Bybit", lambda r: f"BYBIT:{r}.P"),
-                    ("Binance", lambda r: f"BINANCE:{r}.P")):
-        v = venues.get(ex)
-        if v and v.get("raw"):
-            return ("TradingView", "https://www.tradingview.com/chart/?symbol=" + urllib.parse.quote(fmt(v["raw"])))
-    return ("CoinGecko 차트", f"https://www.coingecko.com/en/coins/{coin_id}")
+def fetch_short_ratio(sym):
+    """Bitget 선물 계정 기준 숏 비율(%)"""
+    d = get_json(f"https://api.bitget.com/api/v2/mix/market/account-long-short?symbol={sym}USDT&period=1h",
+                 retries=1, timeout=15).get("data") or []
+    if not d:
+        return None
+    last = d[-1] if isinstance(d, list) else d
+    s = fl(last.get("shortAccountRatio"))
+    if s is None and fl(last.get("longAccountRatio")) is not None:
+        s = 1 - fl(last["longAccountRatio"])
+    return None if s is None else (s * 100 if s <= 1 else s)
 
 
-# ═════════════════════════ 모의 데이터 (테스트용) ═════════════════════════
-def mock_world(seed):
-    rnd = random.Random(seed)
-    btc_spark = [100000 * (1 + 0.002 * i + rnd.uniform(-0.01, 0.01)) for i in range(42)]
-    btc = {"px": btc_spark[-1], "c24": rnd.uniform(-3, 3), "c7": rnd.uniform(-6, 8), "c30": rnd.uniform(-10, 15),
-           "spark": btc_spark}
-    glob = {"btc_dom": rnd.uniform(55, 62)}
-    base_rnd = random.Random(7)  # 코인 구성은 실행마다 동일
-    universe = []
-    for i in range(160):
-        mc = 10 ** base_rnd.uniform(7.3, 10.5)
-        universe.append({"id": f"coin-{i}", "sym": f"C{i}", "name": f"Coin {i}", "mc0": mc})
-    cats = {}
-    for s in SECTORS:
-        members = base_rnd.sample(universe, 45)
-        drift = rnd.uniform(-15, 25)
-        rows = []
-        for u in members:
-            c30 = drift + rnd.uniform(-25, 25)
-            c7 = c30 / 3 + rnd.uniform(-8, 8)
-            px = u["mc0"] / 1e8 * (1 + c30 / 100)
-            spark = [px * (1 - c7 / 100 * (1 - k / 41)) * (1 + rnd.uniform(-0.02, 0.02)) for k in range(42)]
-            mc = u["mc0"] * (1 + c30 / 100)
-            rows.append({"id": u["id"], "sym": u["sym"], "name": u["name"], "px": px, "mc": mc,
-                         "fdv": mc / rnd.uniform(0.3, 1.0), "vol": mc * rnd.uniform(0.01, 0.4),
-                         "dd": rnd.uniform(-97, -5), "c1h": rnd.uniform(-2, 2), "c24": rnd.uniform(-6, 6),
-                         "c7": c7, "c30": c30, "spark": spark})
-        cats[s["key"]] = sorted(rows, key=lambda r: -r["mc"])
-    chain = {s["key"]: {"stable7": rnd.uniform(-3, 3), "tvl7": rnd.uniform(-8, 8), "dex": rnd.uniform(-25, 30)}
-             for s in SECTORS if s.get("llama")}
-    fees = {u["id"]: u["mc0"] * rnd.uniform(0.001, 0.02) for u in universe[:60]}
-    derivs, dstat = {}, {}
-    pxmap = {}
-    for rows in cats.values():
-        for r in rows:
-            pxmap[r["sym"]] = r["px"]
-    for ex in EXCHANGES:
-        d = {}
-        for sym, px in pxmap.items():
-            if base_rnd.random() < 0.6:
-                d[sym] = {"oi": rnd.uniform(1e6, 3e8), "fund_h": rnd.uniform(-0.00002, 0.00006),
-                          "px24": rnd.uniform(-5, 5), "px": px, "raw": sym + "USDT" if ex != "OKX" else sym + "-USDT-SWAP"}
-        derivs[ex] = d
-        dstat[ex] = "ok"
-    return btc, glob, cats, chain, fees, derivs, dstat
-
-
-def mock_extras(ids, seed):
-    rnd, base = random.Random(seed), random.Random(11)
-    listing = {v: {"ids": sorted(i for i in ids if base.random() < p), "krw": {}} for v, p in
-               (("Bitget", .7), ("OKX", .6), ("Binance", .5), ("Upbit", .35))}
-    listing["Upbit"]["krw"] = {i.upper(): i for i in listing["Upbit"]["ids"]}
-    upbit = {i: rnd.uniform(1e9, 5e10) * (3 if rnd.random() < .1 else 1) for i in listing["Upbit"]["ids"]}
-    return listing, upbit
-
-
-def mock_platforms(ids):
-    rnd = random.Random(3)
-    keys = list(PLAT_KO)[:8]
+# ═════════════════════════ 수집: 국내 거래소 ═════════════════════════
+def fetch_upbit_markets():
+    """업비트 마켓 목록: 심볼별 마켓(KRW/BTC/USDT)과 투자유의 여부"""
     out = {}
-    for i in sorted(ids):
-        if rnd.random() < 0.2:
-            out[i] = {}
-        else:
-            out[i] = {rnd.choice(keys): "0x" + "".join(rnd.choice("0123456789abcdef") for _ in range(40))}
+    for m in get_json("https://api.upbit.com/v1/market/all?isDetails=true"):
+        q, base = m["market"].split("-", 1)
+        r = out.setdefault(base.upper(), {"mk": [], "warn": False})
+        r["mk"].append(q)
+        ev = m.get("market_event") or {}
+        if m.get("market_warning") == "CAUTION" or ev.get("warning"):
+            r["warn"] = True
     return out
 
 
-# ═════════════════════════ 분석 ═════════════════════════
-def excluded(c):
-    name = " " + c["name"].lower()
-    return (c["sym"].lower() in STABLE_SYMS or any(w in name for w in EXCLUDE_WORDS)
-            or (c["px"] and 0.97 <= c["px"] <= 1.03) or not c["px"] or c["c30"] is None or c["c7"] is None)
+def fetch_upbit_krw(krw_map):
+    markets = [m["market"] for m in get_json("https://api.upbit.com/v1/market/all?isDetails=false") if m["market"].startswith("KRW-")]
+    out = {}
+    for i in range(0, len(markets), 100):
+        for t in get_json("https://api.upbit.com/v1/ticker?markets=" + ",".join(markets[i:i + 100])):
+            cid = krw_map.get(t["market"].split("-", 1)[1])
+            if cid:
+                out[cid] = fl(t.get("acc_trade_price_24h"))
+        time.sleep(0.3)
+    return out
 
 
-def analyze_coin(c, derivs, dvol, fees, today):
-    venues = {ex: d[c["sym"]] for ex, d in derivs.items() if c["sym"] in d and px_match(d[c["sym"]]["px"], c["px"])}
-    oi = sum(v["oi"] for v in venues.values())
-    fr = [(v["fund_h"], v["oi"]) for v in venues.values() if v["fund_h"] is not None]
-    fund_apr = sum(f * w for f, w in fr) / sum(w for _, w in fr) * 24 * 365 * 100 if fr else None
-    sp = c["spark"]
-    prev = [v for d, v in dvol.get(c["id"], []) if d != today]
-    vr = c["vol"] / statistics.mean(prev) if len(prev) >= 5 and statistics.mean(prev) > 0 else None
-    fee30 = fees.get(c["id"])
-    return {**c, "venues": venues, "oi": oi, "fund_apr": fund_apr,
-            "turn": c["vol"] / c["mc"] if c["mc"] else None,
-            "float": c["mc"] / c["fdv"] if c.get("fdv") else None,
-            "ma7": statistics.mean(sp) if sp else None, "low7": min(sp) if sp else None,
-            "vr": vr, "pf": c["mc"] / (fee30 * 365 / 30) if fee30 else None,
-            "link": tv_link(venues, c["id"])}
+def fetch_bithumb():
+    d = get_json("https://api.bithumb.com/public/ticker/ALL_KRW").get("data") or {}
+    return sorted(k.upper() for k in d if k != "date")
 
 
-def reliability(a, user_venue_check):
-    fails = []
-    if a["mc"] < TH["minor_mcap"]:
-        fails.append("시총 작음")
-    if a["vol"] < TH["min_volume"]:
-        fails.append("거래량 부족")
-    if a["turn"] is not None and not (TH["turnover_min"] <= a["turn"] <= TH["turnover_max"]):
-        fails.append("회전율 이상")
-    if a["float"] is not None and a["float"] < TH["float_min"]:
-        fails.append("유통량 적음")
-    if a["dd"] is not None and a["dd"] < TH["ath_dd_min"]:
-        fails.append("고점 대비 붕괴")
-    if user_venue_check:
-        n = len(a.get("listed") or [])
-        if n == 0:
-            fails.append("상장 거래소 없음")
-        elif a["mc"] < TH["pick_mcap"] and n < TH["small_min_venues"]:
-            fails.append("소형인데 상장 1곳뿐")
-    return fails
+def fetch_upbit_notices():
+    d = get_json("https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=20&category=trade", retries=1, timeout=20)
+    out = []
+    for n in ((d.get("data") or {}).get("notices") or []):
+        t = n.get("title") or ""
+        if "거래지원" in t and ("신규" in t or "추가" in t):
+            out.append({"d": (n.get("listed_at") or n.get("first_listed_at") or "")[:10], "ex": "업비트", "t": t,
+                        "u": f"https://upbit.com/service_center/notice?id={n.get('id')}"})
+    return out[:10]
 
 
-def sector_signals(stable7, dex, oi24, fund_apr, px24, breadth, med7, rs7):
-    def chk(label, cond, why):
-        return {"label": label, "ok": cond, "why": why}
-    early = [
-        chk("BTC보다 강함 (7일)", None if rs7 is None else rs7 > 0, "섹터를 파는 사람이 줄고 돈이 옮겨오는 중. BTC가 급락할 때 '덜 빠진 것'이면 가짜 신호"),
-        chk("스테이블코인 유입 (7일)", None if stable7 is None else stable7 >= TH["stable_in_pct"], "체인 위에 쓸 수 있는 달러가 늘었다는 뜻. 거래소 지갑 이동이 섞일 수 있음"),
-        chk("DEX 거래 증가 (주간)", None if dex is None else dex >= TH["dex_up_pct"], "들어온 달러가 실제로 쓰이는 중. 봇 거래로 부풀려질 수 있음"),
-        chk("현물이 끌고 가는 상승", None if oi24 is None or fund_apr is None else (oi24 > 0 and abs(fund_apr) <= TH["funding_neutral_apr"]), "선물 포지션은 늘지만 롱 쏠림이 없음. 청산 연쇄 위험이 낮은 상승"),
-        chk("섹터 전체로 확산", None if breadth is None else breadth >= TH["breadth_strong"], "대장만이 아니라 여러 코인이 함께 오름. 테마에 돈이 붙었다는 뜻"),
-    ]
-    late = [
-        chk("롱 쏠림 과열", None if fund_apr is None else fund_apr >= TH["funding_hot_apr"], "살 사람이 거의 다 샀다는 뜻. 작은 하락이 연쇄 청산으로 번질 수 있음"),
-        chk("레버리지만 늘고 가격 정체", None if oi24 is None or px24 is None else (oi24 >= TH["oi_jump_pct"] and abs(px24) < TH["price_flat_pct"]), "누군가 받아주며 팔고 있을 가능성"),
-        chk("달러는 빠지는데 가격 유지", None if stable7 is None or med7 is None else (stable7 <= TH["stable_out_pct"] and med7 > 0), "가격을 받치던 돈이 빠지는 중"),
-    ]
-    e = sum(1 for c in early if c["ok"])
-    l = sum(1 for c in late if c["ok"])
-    avail = sum(1 for c in early if c["ok"] is not None)
-    need = max(2, -(-avail * 3 // 5))  # 확인 가능한 신호의 60% 이상 (최소 2개)
-    if l >= 2:
-        label = "과열 경고"
-    elif e >= need and l == 0:
-        label = "초입 정황"
-    elif l == 1:
-        label = "주의"
-    elif e >= 2:
-        label = "개선 중"
-    else:
-        label = "중립"
-    return early, late, e, l, avail, label
+def fetch_binance_notices():
+    d = get_json("https://www.binance.com/bapi/composite/v1/public/cms/article/list/query?type=1&catalogId=48&pageNo=1&pageSize=15",
+                 retries=1, timeout=20)
+    out = []
+    for cat in ((d.get("data") or {}).get("catalogs") or []):
+        for a in cat.get("articles") or []:
+            t = a.get("title") or ""
+            if "Will List" in t or "Will Add" in t:
+                ts = a.get("releaseDate")
+                out.append({"d": utc_day(ts / 1000) if ts else "", "ex": "바이낸스", "t": t,
+                            "u": f"https://www.binance.com/en/support/announcement/{a.get('code', '')}"})
+    return out[:10]
 
 
-def analyze_sector(s, rows, coins, btc, chain, oi_prev, user_check, n_ok):
-    pool = [coins[r["id"]] for r in rows if r["id"] in coins]
-    pool.sort(key=lambda a: -a["mc"])
-    qual = []
-    for rank, a in enumerate(pool, 1):
-        venues_needed = min(TH["major_venues"], max(n_ok, 1))
-        if rank <= TH["major_rank"] and a["mc"] >= TH["major_mcap"] and len(a["venues"]) >= venues_needed:
-            qual.append((a, "메이저"))
-        elif not reliability(a, user_check):
-            qual.append((a, "중형" if a["mc"] >= TH["pick_mcap"] else "소형"))
-    res = {"s": s, "qual": qual, "n_pool": len(pool)}
-    if len(qual) < 3:
-        res.update(label="데이터 부족", strong=False, early=[], late=[], e=0, l=0, avail=0)
-        return res
-    q = [a for a, _ in qual]
-    med7, med30 = med([a["c7"] for a in q]), med([a["c30"] for a in q])
-    paths = [[v / a["spark"][0] - 1 for v in a["spark"]] for a in q if a["spark"] and len(a["spark"]) >= 20 and a["spark"][0]]
-    L = min((len(p) for p in paths), default=0)
-    res["path"] = [statistics.median(p[k] for p in paths) for k in range(L)] if len(paths) >= 3 else None
-    rs7 = med7 - btc["c7"] if med7 is not None and btc.get("c7") is not None else None
-    rs30 = med30 - btc["c30"] if med30 is not None and btc.get("c30") is not None else None
-    breadth = sum(1 for a in q if a["c7"] > 0) / len(q) * 100
-    by_ex, fw, fn, pw, pn = {}, 0.0, 0.0, 0.0, 0.0
-    for a in q:
-        for ex, v in a["venues"].items():
-            by_ex[ex] = by_ex.get(ex, 0) + v["oi"]
-            if v["fund_h"] is not None:
-                fw, fn = fw + v["fund_h"] * v["oi"], fn + v["oi"]
-            if v["px24"] is not None:
-                pw, pn = pw + v["px24"] * v["oi"], pn + v["oi"]
-    fund_apr = fw / fn * 24 * 365 * 100 if fn else None
-    px24 = pw / pn if pn else None
-    common = [ex for ex in by_ex if oi_prev.get(ex)]
-    oi24 = pct(sum(by_ex[e] for e in common), sum(oi_prev[e] for e in common)) if common else None
-    ch = chain.get(s["key"], {})
-    early, late, e, l, avail, label = sector_signals(ch.get("stable7"), ch.get("dex"), oi24, fund_apr, px24, breadth, med7, rs7)
-    strong = label != "과열 경고" and (label in ("초입 정황", "개선 중") or ((rs7 or 0) > 0 and (rs30 or 0) > 0))
-    pfs = [a["pf"] for a in q if a["pf"]]
-    res.update(med7=med7, med30=med30, rs7=rs7, rs30=rs30, breadth=breadth, oi=sum(by_ex.values()) or None,
-               oi24=oi24, oi_by_ex=by_ex, fund_apr=fund_apr, px24=px24, early=early, late=late, e=e, l=l,
-               avail=avail, label=label, strong=strong, pf_med=med(pfs) if len(pfs) >= 3 else None,
-               stable7=ch.get("stable7"), dex=ch.get("dex"), tvl7=ch.get("tvl7"))
-    return res
+# ═════════════════════════ 모의 데이터 (MOCK=1 테스트용) ═════════════════════════
+_MW = {}
 
 
-def corr(x, y):
-    n = min(len(x), len(y))
-    if n < 10:
-        return None
-    x, y = x[-n:], y[-n:]
-    dx = [x[i] - x[i - 1] for i in range(1, n)]
-    dy = [y[i] - y[i - 1] for i in range(1, n)]
-    try:
-        return statistics.correlation(dx, dy)
-    except (statistics.StatisticsError, ZeroDivisionError):
-        return None
+def mock_universe():
+    if _MW:
+        return _MW
+    today = dt.datetime.fromtimestamp(NOW_TS, UTC).date()
+    days = [(today - dt.timedelta(days=CANDLE_DAYS + 10 - i)).isoformat() for i in range(CANDLE_DAYS + 10)]
+    names = ["bitcoin", "ethereum", "tether", "solana", "binancecoin"] + [f"coin-{i:03d}" for i in range(360)] + \
+            ["cash-cat", "artificial-inu-3", "morpho", "lighter", "uniswap", "dydx-chain"]
+    coins = {}
+    for n, cid in enumerate(names):
+        r = random.Random(cid)
+        if cid == "tether":
+            ps = [1.0] * len(days)
+            mc = 150e9
+        else:
+            p = {"bitcoin": 60000, "ethereum": 2500}.get(cid, r.uniform(0.01, 80))
+            drift = r.uniform(-0.002, 0.006)
+            ps = []
+            for i in range(len(days)):
+                boost = 0.02 if (n % 17 == 0 and i > len(days) - 40) else 0
+                p *= 1 + drift + boost + r.gauss(0, 0.035 if cid != "bitcoin" else 0.02)
+                ps.append(p)
+            mc = {"bitcoin": 1.9e12, "ethereum": 3.2e11}.get(cid, math.exp(r.uniform(math.log(4e7), math.log(3e10))))
+        sym = {"bitcoin": "BTC", "ethereum": "ETH", "tether": "USDT", "solana": "SOL", "binancecoin": "BNB",
+               "cash-cat": "CASHCAT", "artificial-inu-3": "AI", "morpho": "MORPHO", "lighter": "LIT",
+               "uniswap": "UNI", "dydx-chain": "DYDX"}.get(cid, "C" + cid[-3:])
+        vols = [mc * r.uniform(0.02, 0.15) * (1.8 if i > len(days) - 3 and n % 5 == 0 else 1) for i in range(len(days))]
+        coins[cid] = {"sym": sym, "name": cid.replace("-", " ").title() if cid != "tether" else "Tether",
+                      "p": ps, "v": vols, "mc0": mc / ps[-1] if ps[-1] else 0}
+    _MW.update({"days": days, "coins": coins})
+    return _MW
 
 
-def exp_signals(a, sec):
-    """실험 신호: 상승 초입 코인의 공통점 (NEAR·ZEC·MET 사례에서 뽑은 가설). ok=None은 데이터 없음"""
-    t = TH
-    path = sec.get("path")
-    cp = [v / a["spark"][0] - 1 for v in a["spark"]] if a["spark"] and a["spark"][0] else None
-    cr = corr(cp, path) if cp and path else None
-    sig = [
-        {"k": "섹터 동조", "ok": None if cr is None else cr >= t["sync_corr"], "v": "" if cr is None else f"{cr:.2f}",
-         "tip": f"최근 7일 가격 흐름이 섹터 전체 흐름과 같이 움직임 (상관계수 {t['sync_corr']} 이상)"},
-        {"k": "거래량 증가 추세", "ok": None if a.get("vtrend") is None else a["vtrend"] >= t["vol_trend"],
-         "v": "" if a.get("vtrend") is None else f"{a['vtrend']:.1f}배", "tip": f"최근 3일 평균 거래량이 그 전 평균의 {t['vol_trend']}배 이상"},
-        {"k": "하락 추세 돌파", "ok": a.get("brk"), "v": "" if a.get("brk") is None else ("돌파" if a["brk"] else ""),
-         "tip": f"고점 대비 {t['break_dd']:.0f}% 이상 빠져 있던 코인이 최근 {t['break_days']}일 최고가를 넘음"},
-        {"k": "사용량 증가", "ok": None if a.get("fee_up") is None else a["fee_up"] >= t["fee_up"],
-         "v": "" if a.get("fee_up") is None else f"수수료 {a['fee_up']:.1f}배", "tip": "최근 7일 프로토콜 수수료가 30일 평균 페이스보다 높음 (디파이 코인만)"},
-        {"k": "숏 스퀴즈 준비", "ok": None if a["fund_apr"] is None or a.get("oi24c") is None else
-            (a["fund_apr"] <= 0 and a["ma7"] is not None and a["px"] > a["ma7"] and a["oi24c"] >= t["squeeze_oi"]),
-         "v": "" if a["fund_apr"] is None else f"펀딩 {a['fund_apr']:.0f}%",
-         "tip": f"펀딩 0 이하(숏 우세)인데 가격은 평균가 위, OI 24시간 {t['squeeze_oi']:.0f}% 이상 증가"},
-        {"k": "업비트 관심", "ok": None if a.get("upx") is None else a["upx"] >= t["upbit_surge"],
-         "v": "" if a.get("upx") is None else f"{a['upx']:.1f}배", "tip": f"업비트 원화 거래대금이 평소의 {t['upbit_surge']}배 이상"},
-    ]
-    return sig, sum(1 for x in sig if x["ok"]), sum(1 for x in sig if x["ok"] is not None)
+def mock_markets():
+    w = mock_universe()
+    out = {}
+    for cid, c in w["coins"].items():
+        p = c["p"]
+        px = p[-1] * (1 + random.Random(cid + str(NOW_TS // 7200)).uniform(-0.01, 0.01))
+        mc = c["mc0"] * px
+        out[cid] = {"id": cid, "sym": c["sym"], "name": c["name"], "px": px, "mc": mc, "fdv": mc * random.Random(cid).uniform(1, 2.2),
+                    "vol": c["v"][-1], "dd": pct(px, max(p)), "c1": pct(px, p[-2]), "c7": pct(px, p[-8]),
+                    "c30": pct(px, p[-31]), "c200": pct(px, p[-201])}
+    return out
 
 
-def evaluate_candidate(a, tier, sec):
-    lag = sec["med30"] - a["c30"]
-    above = a["ma7"] is not None and a["px"] > a["ma7"]
-    vol_ok = None if a["vr"] is None else a["vr"] >= TH["vol_surge"]
-    fund_ok = a["fund_apr"] is None or a["fund_apr"] < TH["coin_funding_max"]
-    pf_cheap = bool(a["pf"] and sec.get("pf_med") and a["pf"] < sec["pf_med"])
-    big = a["mc"] >= TH["pick_mcap"]
-    rule = None
-    if sec["strong"] and lag >= TH["lag_min"] and fund_ok:
-        if above and vol_ok:
-            rule = "red"
-        elif above or vol_ok:
-            rule = "yellow"
-    grade = rule if big else None
-    small_grade = rule if not big else None
-    if sec["label"] in ("초입 정황", "개선 중"):
-        sv = sec["label"]
-    else:
-        sv = "" if sec["rs30"] is None else f"BTC 대비 {sec['rs30']:+.0f}%p"
-    conds = [
-        {"k": "강한 섹터", "ok": sec["strong"], "v": sv, "key": False,
-         "tip": "섹터에 돈이 들어오는 신호가 있거나, BTC보다 7일·30일 모두 강하고 과열 경고가 아님"},
-        {"k": "덜 오름", "ok": lag >= TH["lag_min"], "v": f"{lag:.0f}%p", "key": True,
-         "tip": f"섹터 중앙값보다 30일 수익률이 {TH['lag_min']:.0f}%p 이상 낮음"},
-        {"k": "평균가 위", "ok": above, "v": "", "key": True, "tip": "현재가가 최근 7일 평균 가격보다 높음"},
-        {"k": "거래량", "ok": vol_ok, "v": "쌓는 중" if a["vr"] is None else f"{a['vr']:.1f}배", "key": True,
-         "tip": f"오늘 거래량이 최근 평균의 {TH['vol_surge']}배 이상"},
-        {"k": "펀딩 정상", "ok": fund_ok, "v": "선물 없음" if a["fund_apr"] is None else f"연 {a['fund_apr']:.0f}%", "key": False,
-         "tip": f"선물 펀딩비 연환산 {TH['coin_funding_max']:.0f}% 미만 (롱 쏠림 아님)"},
-        {"k": "시총", "ok": big, "v": f_usd_plain(a["mc"]), "key": False,
-         "tip": f"강조 대상은 시총 {f_usd_plain(TH['pick_mcap'])} 이상"},
-        {"k": "기본 기준", "ok": True, "v": "", "key": False,
-         "tip": "거래량·회전율·유통량·고점 대비 하락폭·상장(Bitget·OKX·Binance·업비트 중 1곳, 소형은 2곳)을 모두 통과"},
-    ]
-    if a.get("xc") is not None:
-        conds.append({"k": "교차 확인", "ok": a["xc"][0], "v": "" if a["xc"][0] else a["xc"][1], "key": False,
-                      "tip": "CoinGecko와 CoinMarketCap의 가격·거래량이 일치하는지"})
-    esig, ehits, eavail = exp_signals(a, sec)
-    exp = bool(sec["strong"] and ehits >= TH["exp_min_hits"])
-
-    vr_bonus = (min(a["vr"], 3) - 1) * 10 if a["vr"] and a["vr"] > 1 else 0
-    score = min(lag, 40) + vr_bonus + max(min(sec["rs30"] or 0, 20), 0) + (10 if pf_cheap else 0)
-    s = sec["s"]
-    why = []
-    if sec["label"] in ("초입 정황", "개선 중"):
-        why.append(f"{s['name']} 섹터로 돈이 들어오는 신호가 있음")
-    elif sec["rs30"] is not None:
-        why.append(f"{s['name']} 섹터가 30일간 BTC보다 {sec['rs30']:+.0f}%p " + ("강함" if sec["rs30"] > 0 else "약함"))
-    why.append(f"섹터 평균보다 30일간 {lag:.0f}%p 덜 올랐음")
-    if vol_ok:
-        why.append(f"오늘 거래량이 평소의 {a['vr']:.1f}배")
-    if above:
-        why.append("7일 평균 가격 위로 올라섬")
-    if pf_cheap:
-        why.append("벌어들이는 수수료에 비해 시총이 섹터 평균보다 낮음")
-    risk = []
-    if a["float"] is not None and a["float"] < 0.7:
-        risk.append(f"유통량이 전체의 {a['float'] * 100:.0f}%. 남은 물량이 풀리면 매도 압력")
-    if a["fund_apr"] is not None and a["fund_apr"] > 20:
-        risk.append(f"선물 롱 쏠림 (펀딩 연 {a['fund_apr']:.0f}%)")
-    if a["mc"] < 150e6:
-        risk.append("시총이 작아 가격이 크게 흔들릴 수 있음")
-    if a["turn"] is not None and a["turn"] > 0.3:
-        risk.append("거래가 과열됨. 급등락 주의")
-    if a["dd"] is not None and a["dd"] < -85:
-        risk.append(f"고점 대비 {a['dd']:.0f}%. 오래 약세였던 코인")
-    if sec["label"] == "주의":
-        risk.append("섹터에 과열 신호가 1개 있음")
-    if vol_ok is None:
-        risk.append("거래량 비교 데이터가 아직 쌓이는 중")
-    if not risk:
-        risk.append("눈에 띄는 위험은 없음. 레버리지는 여전히 주의")
-    return {"a": a, "tier": tier, "sec": sec, "grade": grade, "small_grade": small_grade, "conds": conds,
-            "esig": esig, "ehits": ehits, "eavail": eavail, "exp": exp,
-            "score": score, "lag": lag,
-            "above": above, "vol_ok": vol_ok, "pf_cheap": pf_cheap, "why": why, "risk": risk[:2]}
-
-
-# ═════════════════════════ 기록·성적표·알림 ═════════════════════════
-def update_log(log, picks, coins, sectors_by_key, now_ts):
-    new_red = []
-    for grade in ("red", "yellow", "small", "exp"):
-        # 같은 코인·같은 등급은 7일에 한 번만 기록 (표본 중복·알림 반복 방지)
-        seen = {e["id"] for e in log if e["g"] == grade and now_ts - e["ts"] < 7 * 86400 and major(e.get("v")) == major(VERSION)}
-        for p in picks[grade]:
-            a = p["a"]
-            if a["id"] in seen:
-                continue
-            log.append({"ts": now_ts, "v": VERSION, "id": a["id"], "sym": a["sym"], "sec": p["sec"]["s"]["key"], "g": grade,
-                        "px": a["px"], "low7": a["low7"], "r7": None, "x7": None, "r30": None, "x30": None, "inv": None})
-            if grade == "red":
-                new_red.append(p)
-    for e in log:
-        a = coins.get(e["id"])
-        sec = sectors_by_key.get(e["sec"])
-        if not a or not a["px"]:
+def mock_sector_ids():
+    w = mock_universe()
+    keys = [s["key"] for s in SECTORS if "cg" in s]
+    out = {k: [] for k in keys}
+    for i, cid in enumerate(w["coins"]):
+        if cid in ("tether",):
             continue
-        age = now_ts - e["ts"]
-        if e["inv"] is None and e.get("low7") and a["px"] < e["low7"]:
-            e["inv"] = now_ts
-        if e["r7"] is None and age >= 7 * 86400:
-            e["r7"] = pct(a["px"], e["px"])
-            if sec and sec.get("med7") is not None and e["r7"] is not None:
-                e["x7"] = e["r7"] - sec["med7"]
-        if e["r30"] is None and age >= 30 * 86400:
-            e["r30"] = pct(a["px"], e["px"])
-            if sec and sec.get("med30") is not None and e["r30"] is not None:
-                e["x30"] = e["r30"] - sec["med30"]
-    return log[-6000:], new_red
+        r = random.Random(cid + "s")
+        for k in r.sample(keys, r.choice([1, 1, 2, 3])):
+            out[k].append(cid)
+    return out
+
+
+def mock_global():
+    w = mock_markets()
+    tot = sum(c["mc"] for c in w.values()) * 1.25
+    r = random.Random(NOW_TS // 7200)
+    return {"total": tot, "btc": w["bitcoin"]["mc"] / tot * 100 * r.uniform(0.98, 1.02), "eth": w["ethereum"]["mc"] / tot * 100}
+
+
+def mock_derivs(markets):
+    out = {"Hyperliquid": {}, "Bitget": {}, "OKX": {}}
+    for cid, c in markets.items():
+        r = random.Random(cid + "d" + str(NOW_TS // 7200))
+        if r.random() < 0.6:
+            ex = r.choice(list(out))
+            out[ex][c["sym"]] = {"oi": c["mc"] * r.uniform(0.01, 0.08), "fund_h": r.uniform(-0.00003, 0.00005),
+                                 "px": c["px"], "raw": c["sym"] + "USDT"}
+    return out
+
+
+def mock_listing(markets):
+    out = {}
+    for v in LIST_VENUES:
+        ids = [cid for cid in markets if random.Random(cid + v).random() < (0.8 if v != "Upbit" else 0.45)]
+        out[v] = {"ids": ids, "krw": {markets[i]["sym"]: i for i in ids} if v == "Upbit" else {}}
+    return out
+
+
+def mock_upbit_markets(markets):
+    out = {}
+    for cid, c in markets.items():
+        r = random.Random(cid + "u")
+        x = r.random()
+        if x < 0.45:
+            out[c["sym"]] = {"mk": ["KRW", "BTC", "USDT"], "warn": r.random() < 0.05}
+        elif x < 0.52:
+            out[c["sym"]] = {"mk": ["BTC", "USDT"], "warn": False}
+    return out
+
+
+def mock_candles(cid):
+    w = mock_universe()
+    c = w["coins"][cid]
+    n = CANDLE_DAYS
+    return {"src": "Bitget", "tv": f"BITGET:{c['sym']}USDT", "d": w["days"][-n:], "c": [rnd6(x) for x in c["p"][-n:]],
+            "h": [rnd6(x * 1.02) for x in c["p"][-n:]], "v": [rnd6(x) for x in c["v"][-n:]]}
+
+
+# ═════════════════════════ 판정: 코인 ═════════════════════════
+def excluded(c):
+    name = " " + (c.get("name") or "").lower()
+    return (c["sym"].lower() in STABLE_SYMS or any(w in name for w in EXCLUDE_WORDS)
+            or not c.get("px") or (0.97 <= c["px"] <= 1.03 and abs(c.get("c30") or 0) < 3)
+            or c.get("c30") is None or c.get("c7") is None)
+
+
+def sma(xs, n):
+    return sum(xs[-n:]) / n if len(xs) >= n else None
+
+
+def coin_metrics(c, cd):
+    """거래소 일봉(마감 봉) + 현재가 = 트레이딩뷰 일봉 이평과 같은 방식"""
+    out = {"src": None, "tv": None, "c3": None, "c180": None, "ma20": None, "ma60": None, "ma100": None, "ma200": None,
+           "hi30": None, "brk": False, "slope": None, "hl": False, "rc": 0, "vx": None, "vd": None, "run": None, "offpk": None,
+           "tp": None, "spark": [], "ma20line": [], "wk": [None] * 4, "r90": None}
+    if not cd or len(cd.get("c") or []) < 25 or not c.get("px"):
+        return out
+    cl = [x for x in cd["c"] if x]
+    px = c["px"]
+    s = cl + [px]
+    out.update(src=cd.get("src"), tv=cd.get("tv"))
+    out["c3"] = pct(px, cl[-3]) if len(cl) >= 3 else None
+    out["c180"] = pct(px, cl[-180]) if len(cl) >= 180 else None
+    out["r90"] = pct(px, cl[-90]) if len(cl) >= 90 else None
+    for n in (20, 60, 100, 200):
+        out[f"ma{n}"] = sma(s, n)
+    hs = [x for x in (cd.get("h") or [])[-30:] if x]
+    out["hi30"] = pct(px, max(hs + [px])) if hs else pct(px, max(cl[-30:] + [px]))
+    out["brk"] = len(cl) >= 30 and px > max(cl[-30:])
+    ma20s = [sum(s[i - 20:i]) / 20 for i in range(max(20, len(s) - 14), len(s) + 1)]
+    out["ma20line"] = [rnd6(x) for x in ma20s]
+    out["slope"] = pct(ma20s[-1], ma20s[-6]) if len(ma20s) >= 6 else None
+    out["spark"] = [rnd6(x) for x in s[-31:]]
+    lows = s[-20:]
+    out["hl"] = len(lows) == 20 and min(lows[-10:]) > min(lows[:10])
+    below = 0
+    for k in range(2, 16):   # 어제까지 20일선 아래 연속 일수
+        i = len(s) - k
+        if i < 20:
+            break
+        if s[i] < sum(s[i - 19:i + 1]) / 20:
+            below += 1
+        else:
+            break
+    out["rc"] = below if (out["ma20"] and px > out["ma20"] and below >= TH["reclaim_days"]) else 0
+    v = [x for x in (cd.get("v") or []) if x]
+    if len(v) >= 23 and statistics.mean(v[-23:-3]) > 0:
+        out["vx"] = statistics.mean(v[-3:]) / statistics.mean(v[-23:-3])
+        out["vd"] = v[-1] / statistics.mean(v[-21:-1])
+    # 팀 리더 조언: 익절 구간·2차 파동·꺾임
+    w90 = s[-90:]
+    lo, hi = min(w90), max(w90)
+    out["run"], out["offpk"] = pct(px, lo), pct(px, hi)
+    body = s[-180:-5] if len(s) > 60 else []
+    tp = None
+    if body:
+        i1 = max(range(len(body)), key=lambda i: body[i])
+        p1 = body[i1]
+        trough = min(s[-180:][i1:])
+        if pct(trough, p1) <= TH["wave_dd"] and px >= p1 * 0.9 and px >= trough * 1.25:
+            tp = ["2차 파동 고점 근접", f"첫 고점에서 {pct(trough, p1):.0f}% 조정 후 재상승, " +
+                  (f"첫 고점을 {pct(px, p1):+.0f}% 넘어섬" if px > p1 else f"첫 고점까지 {pct(px, p1):.0f}%")]
+    if not tp and out["run"] >= TH["tp_run"] and out["offpk"] >= TH["tp_near"]:
+        tp = ["급등 누적", f"90일 저점 대비 {out['run']:+.0f}%, 고점 근처"]
+    if not tp and out["run"] >= TH["brk_run"] and out["offpk"] <= TH["brk_off"]:
+        tp = ["꺾임 주의", f"90일 저점 대비 {out['run']:+.0f}% 올랐다가 고점 대비 {out['offpk']:.0f}%"]
+    out["tp"] = tp
+    out["wk"] = [pct(s[-b], s[-a]) if len(s) > a else None for a, b in ((29, 22), (22, 15), (15, 8), (8, 1))]
+    return out
+
+
+def rz(x, xs):
+    m = statistics.median(xs)
+    mad = statistics.median([abs(v - m) for v in xs]) or 1e-9
+    return (x - m) / (1.4826 * mad)
+
+
+def build_world(markets, sec_ids, candles, derivs, listing, upx, oi_prev, short, ex20, upb_mk, bithumb, prev_state):
+    """모든 목록·지표 계산. 결과는 페이지(D)와 기록에 그대로 쓰임"""
+    # 추적 코인: 섹터 소속 + 시총 $70M 이상
+    member = {}
+    for s in SECTORS:
+        for cid in (s.get("ids") or sec_ids.get(s["key"], [])):
+            if cid in markets and cid != "bitcoin":
+                member.setdefault(cid, []).append(s["key"])
+    coins = {}
+    for cid, secs in member.items():
+        c = dict(markets[cid])
+        if excluded(c) or c["mc"] < TH["minor_mcap"]:
+            continue
+        c.update(coin_metrics(c, candles.get(cid)))
+        c["secs"] = secs
+        coins[cid] = c
+    mk7 = med(c["c7"] for c in coins.values())
+    mk30 = med(c["c30"] for c in coins.values())
+    mk3 = med(c["c3"] for c in coins.values() if c["c3"] is not None) or 0
+    # 섹터
+    secs = {}
+    for s in SECTORS:
+        ms = [coins[i] for i, c in coins.items() if s["key"] in c["secs"]]
+        if len(ms) < 3:
+            continue
+        c7 = [c["c7"] for c in ms]
+        x = {"k": s["key"], "n": s["name"], "m3": med(c["c3"] for c in ms if c["c3"] is not None) or 0, "m7": med(c7),
+             "m30": med(c["c30"] for c in ms), "br": sum(1 for v in c7 if v > 0) / len(c7) * 100, "ids": [c["id"] for c in ms],
+             "mc": sum(c["mc"] for c in ms), "watch": bool(s.get("watch")), "native": s.get("native") or [],
+             "thin": len(ms) < TH["sec_min"]}
+        x["x7"], x["x30"] = x["m7"] - mk7, x["m30"] - mk30
+        x["score"] = x["x7"] * 2 + x["x30"] * .5 + (x["br"] - 50) * .3
+        lead = [c for c in ms if (c["vol"] or 0) >= TH["pick_volume"]]
+        if lead:
+            L = max(lead, key=lambda c: c["c30"])
+            x["lead"] = {"id": L["id"], "s": L["sym"], "c30": L["c30"], "c7": L["c7"]}
+        secs[s["key"]] = x
+    order = sorted(secs.values(), key=lambda s: -s["score"])
+    for i, s in enumerate(order):
+        s["rank"], s["top"] = i + 1, False
+    for s in [s for s in order if not s["watch"] and not s["thin"] and s["x7"] > 0 and s["x30"] > 0 and s["br"] >= TH["breadth_min"]][:TH["top_sec"]]:
+        s["top"] = True
+    # 코인별 섹터 안 순위·표준점수 (대표 섹터: 상위 섹터이면서 덜 오른 곳 > 상위 섹터 > 점수)
+    for k, s in secs.items():
+        ms = [coins[i] for i in s["ids"]]
+        c30s, c7s = [c["c30"] for c in ms], [c["c7"] for c in ms]
+        byret = sorted(ms, key=lambda c: -c["c30"])
+        bymc = sorted(ms, key=lambda c: -c["mc"])
+        for c in ms:
+            z30, z7 = rz(c["c30"], c30s), rz(c["c7"], c7s)
+            pri = (s["top"] and z30 <= TH["z30"], s["top"], s["score"])
+            if "sec" not in c or pri > c["_pri"]:
+                c.update(sec=k, _pri=pri, z30=z30, z7=z7, srank=byret.index(c) + 1, sn=len(ms), mrank=bymc.index(c) + 1)
+    coins = {i: c for i, c in coins.items() if "sec" in c}
+    # 코인 판정
+    for cid, c in coins.items():
+        s = secs[c["sec"]]
+        venues = {ex: d[c["sym"]] for ex, d in derivs.items() if c["sym"] in d and px_match(d[c["sym"]]["px"], c["px"])}
+        oi = sum(v["oi"] for v in venues.values())
+        fr = [(v["fund_h"], v["oi"]) for v in venues.values() if v["fund_h"] is not None]
+        c["fund"] = round(sum(f * w for f, w in fr) / sum(w for _, w in fr) * 24 * 365 * 100) if fr else None
+        c["oi"] = pct(oi, oi_prev.get(cid)) if oi and oi_prev.get(cid) else None
+        c["oi_usd"] = oi or None
+        c["sh"] = short.get(cid)
+        c["upx"] = upx.get(cid)
+        c["L"] = "".join(VENUE_CODE[v] for v in VENUE_CODE if cid in listing.get(v, set()) or (v in ("Bitget", "OKX") and v in venues))
+        c["ex20"] = ex20.get(cid)
+        um = upb_mk.get(c["sym"]) or {}
+        c["uwarn"] = bool(um.get("warn")) and "U" in c["L"]
+        c["float"] = c["mc"] / c["fdv"] if c.get("fdv") else None
+        c["fatal"] = c["vol"] < TH["min_volume"] or not c["L"]
+        c["under"] = c["z30"] <= TH["z30"] and c["z7"] <= TH["z7"] and c["c30"] <= TH["cap30"] and c["c7"] <= TH["cap7"]
+        c["a20"] = bool(c["ma20"] and c["px"] > c["ma20"])
+        c["cvol"] = c["vx"] is not None and c["vx"] >= TH["vol_x"]
+        c["cfirst"] = c["c3"] is not None and c["c3"] > s["m3"]
+        sq = [["숏 우세", c["fund"] is not None and c["fund"] <= 0, "펀딩 —" if c["fund"] is None else f"펀딩 {c['fund']}%"],
+              ["숏 쌓임", c["oi"] is not None and c["oi"] >= TH["sq_oi"], "OI —" if c["oi"] is None else f"OI {c['oi']:+.1f}%"],
+              ["숏 계정 많음", c["sh"] is not None and c["sh"] >= TH["sq_short"], "숏 —" if c["sh"] is None else f"숏 {c['sh']:.0f}%"],
+              ["가격 버팀", c["c7"] >= 0, f"7일 {c['c7']:+.1f}%"]]
+        c["sq"], c["sqn"] = sq, sum(1 for q in sq if q[1])
+        c["squeeze"] = c["sqn"] >= 3 and c["fund"] is not None
+        w = []
+        if c["uwarn"]:
+            w.append("업비트 투자유의")
+        if len(c["L"]) < 2:
+            w.append("상장 1곳")
+        if c["float"] is not None and c["float"] < 0.5:
+            w.append(f"유통 {c['float'] * 100:.0f}%")
+        if c["mc"] < TH["pick_mcap"]:
+            w.append("소형")
+        if c["vol"] < TH["pick_volume"]:
+            w.append("거래량 적음")
+        if c["fund"] is not None and c["fund"] >= TH["funding_hot"]:
+            w.append("롱 과열")
+        if c["c7"] > TH["cap7"]:
+            w.append(f"7일 급등 {c['c7']:+.0f}%")
+        if c["c30"] > TH["cap30"]:
+            w.append(f"30일 +{c['c30']:.0f}%")
+        if c["ma20"] and not c["a20"]:
+            w.append("20일선 아래")
+        c["warns"] = w
+        c["hard"] = (c["mc"] >= TH["pick_mcap"] and c["vol"] >= TH["pick_volume"] and len(c["L"]) >= 2
+                     and (c["fund"] is None or c["fund"] < TH["funding_hot"]) and not c["uwarn"])
+        sig = [["덜 오름", c["under"]], ["20일선 위", c["a20"]], ["거래량 증가", c["cvol"]], ["추세 돌파", c["brk"]],
+               ["스퀴즈 준비", c["squeeze"]], ["업비트 관심", (c["upx"] or 0) >= TH["upbit_x"]]]
+        c["sig"], c["nsig"] = sig, sum(1 for q in sig if q[1])
+        c["score"] = round(max(-c["z30"], 0) * 15 + min(max((c["vx"] or 1) - 1, 0) * 25, 25) + max(s["score"], 0) * .5
+                           + (5 if c["cfirst"] else 0) + (6 if c["squeeze"] else 0) - len(w) * 3, 1)
+        # 눌림목: 강하게 오른 섹터의 선두권이 20일선 아래로 조정
+        conds = [("섹터 30일 강함", s["x30"] >= TH["pull_sec30"]), ("코인 30일 +10% 이상", c["c30"] >= TH["pull_c30"]),
+                 ("섹터 안 상위 절반", c["srank"] <= math.ceil(c["sn"] / 2)), ("20일선 아래", bool(c["ma20"] and c["px"] < c["ma20"])),
+                 (f"고점 대비 {TH['pull_hi_max']:.0f}~{TH['pull_hi_min']:.0f}%", c["hi30"] is not None and TH["pull_hi_min"] <= c["hi30"] <= TH["pull_hi_max"])]
+        miss = [a for a, b in conds if not b]
+        c["pull"] = c["pullmiss"] = None
+        if not miss and c["ma20"]:
+            lv = [(n, c[f"ma{n}"]) for n in (60, 100, 200) if c[f"ma{n}"]]
+            below = sorted([x for x in lv if x[1] <= c["px"]], key=lambda x: -x[1])
+            above = sorted([x for x in lv if x[1] > c["px"]], key=lambda x: x[1])
+            if below and pct(c["px"], below[0][1]) <= TH["ma_near"]:
+                st, txt, sup = "hold", f"{below[0][0]}일선 지지 테스트 (+{pct(c['px'], below[0][1]):.1f}%)", below[0][0]
+            elif above and (not below or above[0][0] < below[0][0]):
+                st = "lost"
+                txt = f"{above[0][0]}일선 이탈" + (f" · 다음 {below[0][0]}일선까지 −{(1 - below[0][1] / c['px']) * 100:.0f}%" if below else "")
+                sup = below[0][0] if below else None
+            else:
+                st, sup = "wait", below[0][0] if below else None
+                txt = f"{below[0][0]}일선까지 −{(1 - below[0][1] / c['px']) * 100:.0f}% 남음" if below else "받쳐줄 이평선 없음"
+            q = [["이평 정배열", bool(c["ma60"] and c["ma100"] and c["ma200"] and c["ma60"] > c["ma100"] > c["ma200"])],
+                 ["조정 중 거래량 감소", c["vx"] is not None and c["vx"] < 1], ["펀딩 식음", c["fund"] is None or c["fund"] < 10]]
+            c["pull"] = {"st": st, "txt": txt, "sup": sup, "q": q, "qn": sum(1 for a in q if a[1])}
+        elif 1 <= len(miss) <= 2 and c["c30"] >= TH["pull_c30"] and "20일선 아래" not in miss:
+            c["pullmiss"] = miss
+        c["reclaim"] = None
+        if c["rc"]:
+            turn = bool(c["ma60"] and c["px"] > c["ma60"])
+            q = [["재돌파 거래량 증가", c["vd"] is not None and c["vd"] >= TH["reclaim_vol"]],
+                 ["20일선 기울기 평탄·상승", c["slope"] is not None and c["slope"] >= -0.5], ["저점 상승", c["hl"]]]
+            c["reclaim"] = {"st": "turn" if turn else "bounce", "q": q, "qn": sum(1 for a in q if a[1])}
+        # 상장 후보: 업비트 원화·바이낸스에 없음
+        why = []
+        if "U" not in c["L"] and "B" not in c["L"]:
+            if um.get("mk") and "KRW" not in um["mk"]:
+                why.append("업비트 " + "·".join(um["mk"]) + " 마켓만")
+            if c["sym"] in bithumb:
+                why.append("빗썸 원화 상장")
+            if not why and "G" in c["L"] and "O" in c["L"]:
+                why.append("Bitget·OKX 상장")
+        c["listwhy"] = why
+    live = {i: c for i, c in coins.items() if not c["fatal"]}
+    # Top 3 (시총 순, 유지 규칙)
+    prev_top = set(prev_state.get("top") or [])
+    for c in live.values():
+        s = secs[c["sec"]]
+        c["kept"] = (c["id"] in prev_top and not (s["top"] and c["under"]) and s["rank"] <= TH["top_sec"] + 2 and not s["watch"]
+                     and c["z30"] <= TH["z30_keep"] and c["c7"] <= TH["cap7"] and c["c30"] <= TH["cap30"] and c["hard"])
+    top = sorted([c for c in live.values() if (secs[c["sec"]]["top"] and c["under"] and c["hard"]) or c["kept"]], key=lambda c: -c["mc"])[:3]
+    for i, c in enumerate(top):
+        c["topRank"] = i + 1
+    top_ids = [c["id"] for c in top]
+    early = sorted([c for c in live.values() if c["id"] not in top_ids and secs[c["sec"]]["top"] and c["mc"] >= TH["pick_mcap"] and c["nsig"] >= 2],
+                   key=lambda c: -c["score"])[:TH["early_max"]]
+    small = sorted([c for c in live.values() if c["id"] not in top_ids and c["mc"] < TH["pick_mcap"] and c["nsig"] >= 2],
+                   key=lambda c: -c["score"])[:TH["small_max"]]
+    listc = sorted([c for c in live.values() if c["listwhy"] and c["vol"] >= TH["pick_volume"]], key=lambda c: -c["vol"])[:TH["list_max"]]
+    # 변화 사유
+    pf = prev_state.get("flags") or {}
+    changes = []
+    for c in top:
+        if c["id"] not in prev_top:
+            p = pf.get(c["id"])
+            if p:
+                why = [f"{k} 충족" for k, now in (("상위 섹터", secs[c["sec"]]["top"]), ("덜 오름", c["under"]), ("안전 조건", c["hard"])) if now and not p.get(k)]
+            else:
+                why = ["새로 추적 시작"]
+            changes.append({"t": "in", "s": c["sym"], "id": c["id"], "why": why or ["다른 코인이 빠지면서 시총 순위로 진입"]})
+    for cid in prev_top - set(top_ids):
+        c = coins.get(cid)
+        if not c:
+            changes.append({"t": "out", "s": (pf.get(cid) or {}).get("sym", cid), "id": cid, "why": ["추적 대상에서 빠짐 (시총·거래량)"]})
+            continue
+        s = secs[c["sec"]]
+        if not s["top"]:
+            why = ["상위 섹터 탈락"]
+        elif c["c7"] > TH["cap7"]:
+            why = [f"7일 +{c['c7']:.0f}% 급등으로 상한 초과"]
+        elif c["z30"] > TH["z30_keep"]:
+            why = ["30일 수익률이 섹터 중간 수준까지 따라잡음"]
+        elif not c["hard"]:
+            why = ["안전 조건 탈락"]
+        else:
+            why = ["다른 코인에 밀림 (3개 제한)"]
+        changes.append({"t": "out", "s": c["sym"], "id": cid, "why": why})
+    flags = {c["id"]: {"sym": c["sym"], "상위 섹터": secs[c["sec"]]["top"], "덜 오름": c["under"], "안전 조건": c["hard"]} for c in live.values()}
+    return {"coins": coins, "secs": secs, "mk": {"m3": mk3, "m7": mk7, "m30": mk30, "n": len(coins)}, "top": top, "early": early,
+            "small": small, "listc": listc, "changes": changes, "state": {"top": top_ids, "flags": flags}}
+
+
+# ═════════════════════════ 판정: 시장 ═════════════════════════
+def market_view(W, markets, candles, glob_hist, btc_cd):
+    coins = W["coins"]
+    # BTC
+    b = markets.get("bitcoin") or {}
+    btc = {"px": b.get("px"), "c7": b.get("c7"), "c30": b.get("c30"), "dd": b.get("dd"), "up": None, "slopeUp": None}
+    if btc_cd and len(btc_cd.get("c") or []) >= 55 and b.get("px"):
+        s = btc_cd["c"] + [b["px"]]
+        ma50, ma50p = sma(s, 50), sma(s[:-5], 50)
+        btc.update(up=b["px"] > ma50, slopeUp=ma50 > ma50p, ma50=ma50)
+    # 도미넌스·알트/BTC (전체 시총 기록)
+    g = glob_hist[-1] if glob_hist else {}
+
+    def ago(days):
+        tgt = NOW_TS - days * DAY_S
+        h = min(glob_hist, key=lambda r: abs(r["ts"] - tgt), default=None)
+        return h if h and abs(h["ts"] - tgt) <= 1.5 * DAY_S else None
+    btc.update(dom=g.get("btc"), dom7=None, alt30=None, altd=None)
+    h7 = ago(7)
+    if h7 and g.get("btc") is not None:
+        btc["dom7"] = g["btc"] - h7["btc"]
+
+    def t3b(r):
+        return r["total"] * (1 - (r["btc"] + r["eth"]) / 100) / (r["total"] * r["btc"] / 100) if r and r.get("total") and r.get("btc") else None
+    for d in (30, 7):
+        h = ago(d)
+        if h and t3b(h) and t3b(g):
+            btc["alt30"], btc["altd"] = pct(t3b(g), t3b(h)), d
+            break
+    # 자체 알트시즌 지수: 시총 상위 50개 알트 중 최근 90일 BTC보다 더 오른 비율
+    alts = sorted([c for c in markets.values() if c["id"] != "bitcoin" and not excluded(c)], key=lambda c: -c["mc"])[:50]
+    b90 = pct(b.get("px"), btc_cd["c"][-90]) if btc_cd and len(btc_cd.get("c") or []) >= 90 else None
+    got = [(coins[c["id"]]["r90"] if c["id"] in coins else None) for c in alts]
+    got = [x for x in got if x is not None]
+    if b90 is not None and len(got) >= 25:
+        btc["alt"], btc["altn"], btc["altbase"] = round(sum(1 for x in got if x > b90) / len(got) * 100), len(got), "90일"
+    else:
+        r30 = [c["c30"] for c in alts if c.get("c30") is not None]
+        btc["alt"] = round(sum(1 for x in r30 if x > (b.get("c30") or 0)) / len(r30) * 100) if r30 else None
+        btc["altn"], btc["altbase"] = len(r30), "30일 (90일 기록 쌓는 중)"
+    # 체급 (시총 상위 1000개 기준)
+    uni = [c for c in markets.values() if not excluded(c) and c["mc"] >= TH["minor_mcap"] and c["id"] != "bitcoin"]
+    tiers = []
+    for nm, rg, lo, hi in TIERS:
+        cs = [c for c in uni if lo <= c["mc"] < hi]
+        if not cs:
+            continue
+        ld = [c for c in cs if c["vol"] >= TH["pick_volume"] and c.get("c30") is not None]
+        L = max(ld, key=lambda c: c["c30"]) if ld else None
+        wk = []
+        for j in range(4):
+            r = [coins[c["id"]]["wk"][j] for c in cs if c["id"] in coins and coins[c["id"]]["wk"][j] is not None]
+            wk.append(med(r))
+        tiers.append({"n": nm, "rg": rg, "cnt": len(cs), "m7": med(c["c7"] for c in cs), "m30": med(c["c30"] for c in cs),
+                      "up": sum(1 for c in cs if (c["c7"] or 0) > 0) / len(cs) * 100, "wk": wk,
+                      "lead": {"id": L["id"], "s": L["sym"], "c30": L["c30"]} if L else None})
+    # 대장
+    big = [c for c in coins.values() if c["vol"] >= 20e6]
+    lead = {"ret": None, "vol": None, "top5": []}
+    if big:
+        r1 = max(big, key=lambda c: c["c30"])
+        lead["ret"] = {"id": r1["id"], "s": r1["sym"], "c30": r1["c30"], "vol": r1["vol"]}
+        run = [c for c in big if c["c30"] >= 20]
+        if run:
+            r2 = max(run, key=lambda c: c["vol"])
+            lead["vol"] = {"id": r2["id"], "s": r2["sym"], "c30": r2["c30"], "vol": r2["vol"]}
+        lead["top5"] = [{"id": c["id"], "s": c["sym"], "c30": c["c30"]} for c in sorted(big, key=lambda c: -c["c30"])[:5]]
+    # 시장 폭 (팀 리더 조언: 초기엔 알트가 다 같이 오름)
+    cs = list(coins.values())
+    n = len(cs) or 1
+    wr = [c for c in cs if c["run"] is not None]
+    nw = len(wr) or 1
+    cyc = {"n": len(cs), "b30": sum(1 for c in cs if c["c30"] > 0) / n * 100, "b7": sum(1 for c in cs if c["c7"] > 0) / n * 100,
+           "b7p": None, "big": sum(1 for c in wr if c["run"] >= 50) / nw * 100, "hot": sum(1 for c in wr if c["run"] >= 100) / nw * 100,
+           "tp": sum(1 for c in cs if c["tp"] and c["tp"][0] != "꺾임 주의") / n * 100,
+           "brk": sum(1 for c in cs if c["tp"] and c["tp"][0] == "꺾임 주의") / n * 100}
+    prev7 = [pct(cd["c"][-8], cd["c"][-15]) for cid, cd in candles.items() if cid in coins and len(cd.get("c") or []) >= 15]
+    prev7 = [x for x in prev7 if x is not None]
+    cyc["b7p"] = sum(1 for x in prev7 if x > 0) / len(prev7) * 100 if prev7 else cyc["b7"]
+    # 섹터 순환: 섹터끼리 7일 수익률 차이 (지금 vs 최근 30일 평소)
+    def disp_at(k):
+        m = []
+        for s in W["secs"].values():
+            r = [pct(candles[i]["c"][-1 - k], candles[i]["c"][-8 - k]) for i in s["ids"] if i in candles and len(candles[i]["c"]) > 8 + k]
+            r = [x for x in r if x is not None]
+            if len(r) >= 3:
+                m.append(statistics.median(r))
+        return statistics.pstdev(m) if len(m) >= 5 else None
+    now_d = statistics.pstdev([s["m7"] for s in W["secs"].values()]) if len(W["secs"]) >= 5 else None
+    hist_d = [x for x in (disp_at(k) for k in range(0, 30)) if x is not None]
+    disp = {"now": now_d, "norm": med(hist_d) if hist_d else None}
+    return {"btc": btc, "tiers": tiers, "lead": lead, "cyc": cyc, "disp": disp}
+
+
+# ═════════════════════════ 실전 기록 ═════════════════════════
+LOG_LISTS = [("top", "Top 3"), ("early", "초입 후보"), ("small", "소형 도전"), ("pull", "눌림목 (지지 중)"), ("reclaim", "20일선 재돌파")]
+
+
+def update_log(log, W):
+    coins, secs = W["coins"], W["secs"]
+    picks = {"top": W["top"], "early": W["early"], "small": W["small"],
+             "pull": [c for c in coins.values() if c.get("pull") and c["pull"]["st"] == "hold" and not c["fatal"]],
+             "reclaim": [c for c in coins.values() if c.get("reclaim") and not c["fatal"]]}
+    new_top = []
+    for g, _ in LOG_LISTS:
+        seen = {e["id"] for e in log if e["g"] == g and NOW_TS - e["ts"] < 7 * DAY_S and major(e.get("v")) == major(VERSION)}
+        for c in picks[g]:
+            if c["id"] in seen:
+                continue
+            log.append({"ts": NOW_TS, "v": VERSION, "id": c["id"], "sym": c["sym"], "sec": c["sec"], "g": g, "px": c["px"],
+                        "stop": rnd6(c["ma20"]), "r7": None, "x7": None, "r30": None, "x30": None, "inv": None})
+            if g == "top":
+                new_top.append(c)
+    for e in log:
+        c, s = coins.get(e["id"]), secs.get(e.get("sec"))
+        if not c or not c.get("px"):
+            continue
+        age = NOW_TS - e["ts"]
+        if e.get("inv") is None and e.get("stop") and c["px"] < e["stop"] * 0.97:
+            e["inv"] = NOW_TS
+        if e.get("r7") is None and age >= 7 * DAY_S:
+            e["r7"] = pct(c["px"], e["px"])
+            if s and e["r7"] is not None:
+                e["x7"] = e["r7"] - s["m7"]
+        if e.get("r30") is None and age >= 30 * DAY_S:
+            e["r30"] = pct(c["px"], e["px"])
+            if s and e["r30"] is not None:
+                e["x30"] = e["r30"] - s["m30"]
+    return log[-8000:], new_top
 
 
 def scoreboard(log):
-    """현재 큰 버전의 기록만 집계. 이전 버전 기록은 개수만 따로 표시"""
     cur = [e for e in log if major(e.get("v")) == major(VERSION)]
-    out = {"old": len(log) - len(cur)}
-    log = cur
-    for g in ("red", "yellow", "small", "exp"):
-        done = [e for e in log if e["g"] == g and e["x7"] is not None]
-        wins = sum(1 for e in done if e["x7"] > 0)
-        out[g] = {"n": len(done), "wins": wins, "rate": wins / len(done) * 100 if done else None,
-                  "avg": statistics.mean(e["x7"] for e in done) if done else None,
-                  "total": sum(1 for e in log if e["g"] == g)}
+    out = {"old": len(log) - len(cur), "lists": []}
+    for g, name in LOG_LISTS:
+        done = [e for e in cur if e["g"] == g and e.get("x7") is not None]
+        out["lists"].append({"g": g, "n": name, "total": sum(1 for e in cur if e["g"] == g), "n7": len(done),
+                             "win7": sum(1 for e in done if e["x7"] > 0) / len(done) * 100 if done else None,
+                             "med7": med(e["x7"] for e in done), "avg7": statistics.mean(e["x7"] for e in done) if done else None})
     return out
 
 
-def telegram(picks):
-    if not (TG_TOKEN and TG_CHAT) or not picks:
+def telegram(new_top):
+    if not (TG_TOKEN and TG_CHAT) or not new_top:
         return None
     lines = []
-    for p in picks:
-        a = p["a"]
-        lines.append(f"🔴 {a['sym']} ({p['sec']['s']['name']}) · {chain_text(a, p['sec']['s']['key'])}\n왜: " + " / ".join(p["why"][1:3]) +
-                     f"\n위험: {p['risk'][0]}\n무효: 7일 저점 {f_px(a['low7'])} 이탈 시\n차트: {a['link'][1]}")
+    for c in new_top:
+        lines.append(f"🟣 Top 3 진입: {c['sym']} ({c['sec']})\n7일 {c['c7']:+.1f}% · 30일 {c['c30']:+.1f}%\n"
+                     f"무효: 20일선 {c['ma20']:.6g} 아래 마감 시" if c.get("ma20") else f"🟣 Top 3 진입: {c['sym']}")
     if PAGE_URL:
         lines.append(f"전체 보기: {PAGE_URL}")
     try:
@@ -905,932 +1100,881 @@ def telegram(picks):
         return f"텔레그램 전송 실패: {type(e).__name__}"
 
 
-# ═════════════════════════ 렌더링 ═════════════════════════
-def esc(x):
-    return html.escape(str(x))
-
-
-def f_pct(v, d=1, pp=False):
-    if v is None:
-        return '<span class="na">—</span>'
-    cls = "up" if v > 0 else "down" if v < 0 else ""
-    return f'<span class="{cls}">{v:+.{d}f}{"%p" if pp else "%"}</span>'
-
-
-def f_usd(v):
-    if not v:
-        return '<span class="na">—</span>'
-    for unit, div in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
-        if abs(v) >= div:
-            return f"${v / div:,.1f}{unit}"
-    return f"${v:,.0f}"
-
-
-def f_px(v):
-    if not v:
-        return "—"
-    if v >= 1000:
-        return f"${v:,.0f}"
-    if v >= 1:
-        return f"${v:,.2f}"
-    return f"${v:.4g}"
-
-
-LABEL_CLS = {"초입 정황": "l-early", "개선 중": "l-improve", "중립": "l-neutral", "주의": "l-caution",
-             "과열 경고": "l-hot", "데이터 부족": "l-neutral"}
-LABEL_SAY = {
-    "초입 정황": "돈이 들어오기 시작한 정황이 여러 개. 가장 눈여겨볼 상태",
-    "개선 중": "좋아지는 신호가 일부 있음",
-    "중립": "뚜렷한 방향 없음",
-    "주의": "과열 신호가 1개 있음. 새로 들어가기엔 조심",
-    "과열 경고": "과열 신호가 2개 이상. 이 섹터에서는 새로 들어가지 않는 편이 안전",
-    "데이터 부족": "기준을 통과한 코인이 3개 미만",
-}
-GLOSSARY = [
-    ("섹터 중앙값", "섹터 안 코인들의 수익률을 줄 세웠을 때 가운데 값. 대장 코인 하나에 휘둘리지 않는 '섹터 평균'."),
-    ("메이저 / 중형 / 소형", "메이저: 섹터 시총 상위 5위 안 + 시총 $1B 이상 + 선물이 여러 거래소에 상장. 중형: 시총 $300M 이상이면서 기본 기준을 통과. 소형: 시총 $70M~300M이면서 기본 기준 통과 + 상장 거래소 2곳 이상. 소형은 강조·알림에서 빼고 성적만 따로 기록합니다."),
-    ("DEX 토큰 주의", "DEX(탈중앙 거래소)에는 누구나 같은 이름의 토큰을 만들 수 있습니다. 이 모니터는 Bitget·OKX·Binance·업비트 상장 코인만 보여주지만, 앱에서 검색할 때는 상장 거래소의 현물·선물 탭에서 찾고 체인·컨트랙트 주소 앞뒤 글자가 같은지 확인하세요."),
-    ("7일 평균 가격", "최근 7일 가격의 평균. 현재가가 이 위로 올라섰다는 건 단기 흐름이 위로 돌아섰을 가능성."),
-    ("거래량 배수", "오늘 거래량 ÷ 최근 며칠 평균 거래량. 1.5배 이상이면 평소보다 관심이 몰린 것."),
-    ("유통량 비율", "지금 시장에 풀린 물량 ÷ 전체 발행 예정 물량. 낮을수록 앞으로 풀릴 물량(매도 압력)이 많음."),
-    ("펀딩비", "선물에서 롱과 숏이 서로 주고받는 비용. 연 40% 이상이면 롱이 한쪽으로 크게 쏠린 상태."),
-    ("OI (미결제약정)", "아직 정리되지 않은 선물 포지션의 총액. 늘면 레버리지 돈이 새로 들어오는 중."),
-    ("스테이블코인 유입", "체인 위의 달러(USDT·USDC) 총량 변화. 늘면 그 체인에서 쓸 수 있는 실탄이 늘어난 것."),
-    ("수수료 대비 시총", "1년치 수수료 수입 대비 시총. 주식의 PER과 비슷. 같은 섹터 안에서 낮을수록 상대적으로 싸다."),
-]
-CHECKLIST = ["일봉에서 고점과 저점이 높아지는 구조로 바뀌었는가", "무효 가격(7일 저점)과 현재가 거리가 감당할 만한가",
-             "상승하는 봉에 거래량이 함께 붙었는가"]
-
-
-def tag(s):
-    return f'<span class="tag">#{esc(s["name"].replace(" ", "_"))}</span>'
-
-
-def chain_pick(a, sec_key=None):
-    pl = a.get("plats")
-    if pl is None:
-        return None
-    if not pl:
-        return ("메인넷 코인", "")
-    pref = SEC_PLAT.get(sec_key)
-    k = pref if pref in pl else next(iter(pl))
-    return (PLAT_KO.get(k, k), pl[k], len(pl) - 1)
-
-
-def short_addr(addr):
-    return addr if len(addr) <= 14 else addr[:6] + "…" + addr[-5:]
-
-
-def chain_text(a, sec_key=None):
-    c = chain_pick(a, sec_key)
-    if not c:
-        return "체인 정보 없음"
-    return c[0] if not c[1] else f"{c[0]} {short_addr(c[1])}"
-
-
-def chain_html(a, sec_key=None):
-    c = chain_pick(a, sec_key)
-    if not c:
-        return '<span class="na">체인 정보 없음</span>'
-    if not c[1]:
-        return f'<span title="토큰이 아니라 자체 블록체인의 기본 코인">{c[0]}</span>'
-    more = f' <span class="na">외 {c[2]}개 체인</span>' if c[2] else ""
-    return (f'{esc(c[0])} <code title="{esc(c[1])}">{esc(short_addr(c[1]))}</code>'
-            f'<button class="copy" data-copy="{esc(c[1])}" aria-label="컨트랙트 주소 복사">복사</button>{more}')
-
-
-VENUE_KO = {"Bitget": "Bitget", "OKX": "OKX", "Binance": "Binance", "Upbit": "업비트"}
-
-
-def venue_html(a):
-    ls = a.get("listed") or []
-    return " ".join(f'<span class="{"up" if v in ls else "na"}">{"✓" if v in ls else "✕"} {VENUE_KO[v]}</span>' for v in USER_VENUES)
-
-
-def spark_svg(sp, w=76, h=22):
-    if not sp or len(sp) < 2:
-        return ""
-    lo, hi = min(sp), max(sp)
-    rng = (hi - lo) or 1
-    pts = " ".join(f"{i / (len(sp) - 1) * w:.1f},{h - 2 - (v - lo) / rng * (h - 4):.1f}" for i, v in enumerate(sp))
-    cls = "sp-up" if sp[-1] >= sp[0] else "sp-dn"
-    return f'<svg class="spark {cls}" viewBox="0 0 {w} {h}" width="{w}" height="{h}" aria-hidden="true"><polyline points="{pts}"/></svg>'
-
-
-def chip(c):
-    ok = c["ok"]
-    cls = "ok" if ok else "na" if ok is None else "bad"
-    mark = "✓" if ok else "–" if ok is None else "✕"
-    val = f' <em>{esc(c["v"])}</em>' if c.get("v") else ""
-    return f'<span class="chip {cls}" title="{esc(c.get("tip", ""))}">{mark} {esc(c["k"])}{val}</span>'
-
-
-def chips(p, compact=False):
-    cs = p["conds"]
-    if not compact:
-        return '<div class="chips">' + "".join(chip(c) for c in cs) + "</div>"
-    keys = [c for c in cs if c["key"]]
-    rest = [c for c in cs if not c["key"]]
-    out = "".join(chip(c) for c in keys) + "".join(chip(c) for c in rest if not c["ok"])
-    good = [c for c in rest if c["ok"]]
-    if good:
-        out += f'<span class="chip ok" title="{esc(", ".join(c["k"] for c in good))} 통과">✓ 기본 {len(good)}개</span>'
-    return '<div class="chips">' + out + "</div>"
-
-
-def act_html(a, spark_ids):
-    spark_ids.add(a["id"])
-    return (f'<a href="{esc(a["link"][1])}" target="_blank" rel="noopener">차트</a>'
-            f'<button class="cmp" data-id="{esc(a["id"])}" aria-pressed="false">비교</button>')
-
-
-def coin_row(p, spark_ids, extra=""):
-    a = p["a"]
-    return (f'<tr><td><b>{esc(a["sym"])}</b><small>{esc(a["name"][:18])}</small></td><td><span class="tier">{p["tier"]}</span></td>'
-            f'<td>{f_pct(a["c7"])}</td><td>{f_pct(a["c30"])}</td>{extra}<td class="act">{act_html(a, spark_ids)}</td></tr>')
-
-
-def focus_card(p, spark_ids):
-    a = p["a"]
-    sk = p["sec"]["s"]["key"]
-    dist = pct(a["low7"], a["px"]) if a["low7"] and a["px"] else None
-    chk = "".join(f"<li>{esc(c)}</li>" for c in CHECKLIST)
-    return f"""
-<article class="card focus" data-coin="{esc(a["id"])}">
- <div class="card-h"><span class="c-icon" aria-hidden="true">◆</span><b class="sym">{esc(a["sym"])}</b><span class="c-name">{esc(a["name"])}</span>{spark_svg(a["spark"])}<span class="px">{f_px(a["px"])}</span></div>
- <p class="meta">{tag(p["sec"]["s"])}<span class="tier">{p["tier"]} · 시총 {f_usd_plain(a["mc"])}</span> 7일 {f_pct(a["c7"])} · 30일 {f_pct(a["c30"])}</p>
- <p class="meta">{chain_html(a, sk)}<span class="sep">·</span><span class="nw">상장 {venue_html(a)}</span></p>
- {chips(p)}
- <p class="line"><span class="k">위험</span>{esc(" · ".join(p["risk"]))}</p>
- <p class="line"><span class="k">무효</span>7일 저점 <b>{f_px(a["low7"])}</b> 이탈 또는 섹터 '과열 경고' 시 제외. 현재가에서 {f_pct(dist)}</p>
- <div class="c-actions"><a class="btn" href="{esc(a["link"][1])}" target="_blank" rel="noopener">{esc(a["link"][0])}에서 차트</a>
- <button class="cmp btn ghost" data-id="{esc(a["id"])}" aria-pressed="false">비교 차트에 추가</button></div>
- <details class="inner"><summary>자세히 · 차트 체크리스트</summary>
-  <table class="kv"><tr><td>유통량 비율</td><td>{"—" if a["float"] is None else f'{a["float"] * 100:.0f}%'}</td></tr>
-  <tr><td>고점 대비</td><td>{f_pct(a["dd"], 0)}</td></tr>
-  <tr><td>하루 거래량 / 회전율</td><td>{f_usd_plain(a["vol"])} / {"—" if a["turn"] is None else f'{a["turn"] * 100:.0f}%'}</td></tr></table>
-  <ul class="check">{chk}</ul></details>
-</article>"""
-
-
-def exp_chips(p):
-    out = "".join(chip(x) for x in p["esig"] if x["ok"]) + "".join(
-        chip({**x, "ok": None, "v": ""}) for x in p["esig"] if x["ok"] is False)
-    return f'<div class="chips"><span class="chip hits">신호 {p["ehits"]}/{p["eavail"]}</span>{out}</div>'
-
-
-def row_item(p, spark_ids, mode="lag"):
-    a = p["a"]
-    return f"""<li class="row" data-coin="{esc(a["id"])}">{spark_svg(a["spark"])}<div class="row-h"><b class="sym">{esc(a["sym"])}</b><span class="c-name">{esc(a["name"][:20])}</span>{tag(p["sec"]["s"])}
-<span class="nums-s">7일 {f_pct(a["c7"])} · 30일 {f_pct(a["c30"])}</span></div>
-{exp_chips(p) if mode == "exp" else chips(p, True)}<div class="row-f"><p class="meta sm"><span class="tier">{p["tier"]} · {f_usd_plain(a["mc"])}</span><span class="sep">·</span>{chain_html(a, p["sec"]["s"]["key"])}<span class="sep">·</span><span class="nw">상장 {venue_html(a)}</span></p><span class="act">{act_html(a, spark_ids)}</span></div></li>"""
-
-
-def row_list(items, spark_ids, first=5, more_label="나머지", mode="lag"):
-    if not items:
-        return ""
-    head = "".join(row_item(p, spark_ids, mode) for p in items[:first])
-    tail = items[first:]
-    extra = "" if not tail else (f'<details class="inner"><summary>{more_label} {len(tail)}개 더 보기</summary>'
-                                 f'<ul class="rows">{"".join(row_item(p, spark_ids, mode) for p in tail)}</ul></details>')
-    return f'<ul class="rows">{head}</ul>{extra}'
-
-
-def bt_verdict(bt):
-    if not bt:
-        return "아직 없음 (Actions → backfill 실행)", "na"
-    if major(bt.get("v")) != major(VERSION):
-        return f"옛 규칙(v{bt.get('v', '1.0')}) 결과. backfill을 다시 실행하세요", "warn-text"
-    s = bt["summary"]["red"]
-    if (s["n7"] or 0) < 30:
-        return f"표본 부족 ({s['n7']}개)", "warn-text"
-    if s["win7"] >= 55 and (s["avg7"] or 0) > 0 and (s.get("med7") or 0) > 0:
-        return f"통과: 7일 뒤 섹터보다 좋았던 비율 {s['win7']:.0f}% ({s['n7']}개)", "up"
-    return f"미달: 7일 뒤 섹터보다 좋았던 비율 {s['win7']:.0f}% ({s['n7']}개)", "down"
-
-
-def pc(v):
-    return '<span class="na">—</span>' if v is None else f"{v:.0f}%"
-
-
-def bt_row(name, s, note=""):
-    return (f'<tr><td>{name}{f"<small>{note}</small>" if note else ""}</td><td>{s["n7"]}</td><td>{pc(s["win7"])}</td>'
-            f'<td>{f_pct(s["avg7"], 1, True)}</td><td>{f_pct(s.get("med7"), 1, True)}</td><td>{pc(s["win30"])}</td></tr>')
-
-
-BT_HEAD = '<tr><th>구분</th><th>표본</th><th>7일 승률</th><th>7일 평균</th><th>7일 중앙값</th><th>30일 승률</th></tr>'
-VARIANT_NAMES = [("base", "기준선", "강한 섹터의 모든 코인"), ("lag", "덜 오름만", ""), ("lag_above", "덜 오름 + 평균가 위", ""),
-                 ("lag_vol", "덜 오름 + 거래량", ""), ("both", "덜 오름 + 둘 다", "= 지금 볼 것 규칙"),
-                 ("lead", "반대 전략", "섹터보다 더 오른 코인 + 평균가 위")]
-
-
-def bt_section(bt):
-    if not bt:
-        return ('<p class="na">아직 실행하지 않았습니다. Actions 탭 → backfill → Run workflow를 한 번 실행하면 '
-                '과거 1년 데이터로 이 규칙의 성적을 계산합니다.</p>')
-    sm = bt["summary"]
-    old = major(bt.get("v")) != major(VERSION)
-    warn = f'<p class="warn-text">이 결과는 v{esc(bt.get("v", "1.0"))} 규칙으로 계산됐습니다. backfill을 다시 실행해야 현재 규칙의 성적이 나옵니다.</p>' if old else ""
-    parts = [f'<p class="meta">과거 {esc(bt["start"])} ~ {esc(bt["end"])} · 코인 {bt["coins"]}개 · 계산일 '
-             f'{dt.datetime.fromtimestamp(bt["ts"], KST):%Y-%m-%d}</p>{warn}',
-             f'<div class="tbl"><table class="list">{BT_HEAD}{bt_row("지금 볼 것", sm["red"])}{bt_row("관심 목록", sm["yellow"])}'
-             + (bt_row("소형 (참고)", sm["small"]) if "small" in sm else "")
-             + (bt_row("상승 초입 (실험)", sm["exp"], "과거 데이터로 가능한 신호 3개만") if "exp" in sm else "") + '</table></div>',
-             '<p class="na sm">무작위로 골라도 7일 승률은 약 50%입니다. 승률 55% 이상, 평균·중앙값 모두 플러스여야 통과입니다.</p>']
-    if bt.get("halves"):
-        h = bt["halves"]
-        parts.append(f'<details class="inner"><summary>기간 나눠 검증 (지금 볼 것)</summary><div class="tbl"><table class="list">{BT_HEAD}'
-                     + "".join(bt_row(k, v) for k, v in h.items()) + '</table></div>'
-                     '<p class="na sm">앞 기간에서만 좋고 뒤 기간에서 무너지면 우연히 맞은 규칙일 가능성이 큽니다.</p></details>')
-    if bt.get("variants"):
-        v = bt["variants"]
-        parts.append(f'<details class="inner"><summary>조건별 성적 · 반대 전략 비교</summary><div class="tbl"><table class="list">{BT_HEAD}'
-                     + "".join(bt_row(n, v[k], note) for k, n, note in VARIANT_NAMES if k in v) + '</table></div>'
-                     '<p class="na sm">조건을 하나씩 더할 때 승률이 오르면 그 조건이 도움, 내려가면 방해입니다. 개수 제한 없이 계산해 위 표와 표본 수가 다릅니다.</p></details>')
-    secs = "".join(f'<tr><td>{esc(k)}</td><td>{s["n7"]}</td><td>{pc(s["win7"])}</td><td>{f_pct(s["avg7"], 1, True)}</td></tr>'
-                   for k, s in bt["by_sector"].items())
-    recent = "".join(
-        f'<tr><td>{esc(t["date"][5:])}</td><td><b>{esc(t["sym"])}</b></td><td>{esc(t["sec"])}</td><td>{f_pct(t["r7"])}</td>'
-        f'<td>{f_pct(t["x7"], 1, True)}</td><td>{"이탈" if t["stop"] else ""}</td></tr>' for t in reversed(bt["recent"][-15:]))
-    parts.append(f'<details class="inner"><summary>섹터별 성적</summary><div class="tbl"><table class="list"><tr><th>섹터</th><th>표본</th><th>승률</th><th>평균</th></tr>{secs}</table></div></details>')
-    parts.append(f'<details class="inner"><summary>최근 과거 강조 사례</summary><div class="tbl"><table class="list"><tr><th>날짜</th><th>코인</th><th>섹터</th><th>7일</th><th>섹터 대비</th><th>무효가</th></tr>{recent}</table></div></details>')
-    parts.append('<details class="inner"><summary>백테스트의 한계</summary><ul>'
-                 '<li>지금 카테고리에 남은 코인만으로 과거를 돌렸습니다(사라진 코인 제외). 실제보다 결과가 좋게 나올 수 있습니다.</li>'
-                 "<li>과거의 선물·스테이블코인 데이터가 없어 '강한 섹터'를 가격(BTC 대비 7일·30일)으로만 판정했습니다.</li>"
-                 '<li>수수료·슬리피지는 빼지 않았습니다. 결과를 보고 기준을 반복해서 바꾸면 과거에만 맞는 규칙이 됩니다.</li></ul></details>')
-    return "".join(parts)
-
-
-def rules_html():
-    t = TH
-    items = [
-        ("강조 대상", f"시총 {f_usd_plain(t['pick_mcap'])} 이상 (메이저·중형). {f_usd_plain(t['minor_mcap'])}~{f_usd_plain(t['pick_mcap'])}은 소형(참고)으로 따로 표시하고 성적도 따로 기록"),
-        ("강한 섹터", "돈이 들어오는 신호(초입 정황·개선 중)가 있거나, 섹터 중앙값이 BTC보다 7일·30일 모두 강함. 과열 경고 섹터는 제외"),
-        ("덜 오름", f"섹터 중앙값보다 30일 수익률이 {t['lag_min']:.0f}%p 이상 낮음"),
-        ("평균가 위", "현재가가 최근 7일 평균 가격보다 높음"),
-        ("거래량", f"오늘 거래량이 최근 평균의 {t['vol_surge']}배 이상"),
-        ("펀딩 정상", f"선물 펀딩비 연환산 {t['coin_funding_max']:.0f}% 미만"),
-        ("기본 기준", f"하루 거래량 {f_usd_plain(t['min_volume'])} 이상, 회전율 {t['turnover_min'] * 100:.0f}~{t['turnover_max'] * 100:.0f}%, "
-                  f"유통량 {t['float_min'] * 100:.0f}% 이상, 고점 대비 {t['ath_dd_min']:.0f}% 이내, Bitget·OKX·Binance·업비트 중 1곳 이상 상장 (소형은 2곳 이상). DEX에서만 거래되는 코인은 제외"),
-        ("지금 볼 것", "위 조건을 모두 통과"),
-        ("관심 목록", "평균가 위·거래량 중 하나만 통과하고 나머지는 모두 통과"),
-        ("상승 초입 (실험)", f"강한 섹터 안에서 실험 신호 6개 중 {t['exp_min_hits']}개 이상. 신호 개수가 많은 순. 규칙이 아니라 검증 중인 가설이며 성적을 따로 기록"),
-        ("섹터 동조", f"최근 7일 가격 흐름과 섹터 흐름의 상관계수 {t['sync_corr']} 이상"),
-        ("거래량 증가 추세", f"최근 3일 평균 거래량이 그 전 평균의 {t['vol_trend']}배 이상"),
-        ("하락 추세 돌파", f"고점 대비 {t['break_dd']:.0f}% 이상 빠져 있던 코인이 최근 {t['break_days']}일 최고가를 넘음"),
-        ("사용량 증가", f"최근 7일 수수료가 30일 평균 페이스의 {t['fee_up']}배 이상 (디파이 코인만)"),
-        ("숏 스퀴즈 준비", f"펀딩 0 이하 + 가격이 7일 평균 위 + OI 24시간 {t['squeeze_oi']:.0f}% 이상 증가"),
-        ("업비트 관심", f"업비트 원화 거래대금이 평소의 {t['upbit_surge']}배 이상"),
-        ("교차 확인", f"CoinGecko와 CoinMarketCap 가격 차이 {t['xcheck_px']:.0f}% 이내, 거래량 차이 {t['xcheck_vol']:.0f}배 이내"),
-    ]
-    return '<dl class="gloss">' + "".join(f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in items) + "</dl>"
-
-
-def changelog_html():
-    out = []
-    for v, d, kind, items in CHANGELOG:
-        lis = "".join(f"<li>{esc(x)}</li>" for x in items)
-        out.append(f'<div class="cl"><p><b>v{v}</b> <span class="na">{d} · {kind}</span></p><ul>{lis}</ul></div>')
-    return "".join(out)
-
-
-def render(ctx):
-    now, btc, glob, sectors, picks, board, dstat, errors, meta = (
-        ctx["now"], ctx["btc"], ctx["glob"], ctx["sectors"], ctx["picks"], ctx["board"], ctx["dstat"], ctx["errors"], ctx["meta"])
-    spark_ids = set()
-    bt = ctx.get("bt")
-
-    # 상단 상태
-    ex_pills = "".join(f'<span class="pill {"ok" if dstat.get(ex) == "ok" else "bad"}">{"✓" if dstat.get(ex) == "ok" else "✕"} {ex}</span>' for ex in EXCHANGES)
-    red_b, yel_b = board["red"], board["yellow"]
-    if red_b["n"] < TH["verify_min_samples"]:
-        live = f'실전 <span class="warn-text">검증 전</span> ({red_b["n"]}/{TH["verify_min_samples"]}개)'
-    else:
-        live = f'실전 {red_b["rate"]:.0f}% ({red_b["wins"]}/{red_b["n"]}개)'
-    bt_say, bt_cls = bt_verdict(bt)
-    props = f"""
-<dl class="props">
- <div><dt>갱신</dt><dd>{now:%m-%d %H:%M} KST <span class="na">· 섹터 {meta["cat_age"]}</span></dd></div>
- <div><dt>선물 데이터</dt><dd>{ex_pills}</dd></div>
- <div><dt>도구 성적</dt><dd>{live} <span class="na">·</span> 백테스트 <span class="{bt_cls}">{bt_say}</span></dd></div>
-</dl>"""
-    errs = "" if not errors else (f'<details class="inner warnbox"><summary>받지 못한 데이터 {len(errors)}건</summary><ul>'
-                                  + "".join(f"<li>{esc(e)}</li>" for e in errors[:15]) + "</ul></details>")
-
-    # BTC
-    c7 = btc.get("c7")
-    if c7 is None:
-        btc_say, btc_cls = "BTC 데이터를 받지 못했습니다. 아래 판정은 참고만 하세요.", "warn"
-    elif c7 <= -8:
-        btc_say, btc_cls = "BTC가 1주일 새 크게 빠졌습니다. 아래 신호 대부분이 믿기 어렵습니다.", "warn"
-    elif c7 <= -3:
-        btc_say, btc_cls = "BTC 약세. 새로 들어가는 건 보수적으로.", "warn"
-    else:
-        btc_say, btc_cls = "BTC 흐름 정상.", "info"
-    dom = "—" if glob.get("btc_dom") is None else f'{glob["btc_dom"]:.1f}%'
-    btc_block = (f'<div class="callout {btc_cls} slim"><b>BTC</b> {f_px(btc.get("px"))} <span class="nums-s">7일 {f_pct(c7)} · 30일 '
-                 f'{f_pct(btc.get("c30"))} · 도미넌스 {dom}</span><span class="say">{btc_say}</span></div>')
-
-    # 지금 볼 것 / 관심 / 소형
-    if picks["red"]:
-        focus = "".join(focus_card(p, spark_ids) for p in picks["red"])
-    else:
-        focus = f'<div class="callout empty slim">{esc(meta["empty_reason"])}</div>'
-    watch = row_list(picks["yellow"], spark_ids) or '<p class="na">관심 목록 조건을 통과한 코인이 없습니다.</p>'
-    exp = picks.get("exp") or []
-    exp_html = row_list(exp, spark_ids, first=5, mode="exp") or '<p class="na">강한 섹터에서 실험 신호 2개 이상을 동시에 보인 코인이 없습니다.</p>'
-    small = picks.get("small") or []
-    small_html = "" if not small else (
-        f'<details class="fold"><summary>소형 코인 (참고) <span class="na">{len(small)}개 · 시총 {f_usd_plain(TH["minor_mcap"])}~{f_usd_plain(TH["pick_mcap"])}, 기록·알림 제외</span></summary>'
-        f'{row_list(small, spark_ids, first=len(small))}</details>')
-
-    # 섹터
-    sec_html = []
-    for sec in sorted(sectors, key=lambda x: (x["label"] == "데이터 부족", -(x.get("rs30") or -999))):
-        s = sec["s"]
-        head = (f'<summary><span class="s-name">{esc(s["name"])}</span><span class="kind">{s["kind"]}</span>'
-                f'<span class="label {LABEL_CLS[sec["label"]]}">{sec["label"]}</span>'
-                f'<span class="s-rs" title="BTC 대비 30일">{f_pct(sec.get("rs30"), 0, True)}</span></summary>')
-        if sec["label"] == "데이터 부족":
-            sec_html.append(f'<details class="sector" data-sec="{s["key"]}">{head}<p class="na">{LABEL_SAY["데이터 부족"]} (후보 {sec["n_pool"]}개 중)</p></details>')
-            continue
-        gain = sorted(sec["qual"], key=lambda t: -t[0]["c7"])[: TH["top_n"]]
-        gain_rows = "".join(coin_row({"a": a, "tier": t}, spark_ids) for a, t in gain)
-        cands = sorted([c for c in sec["cands"] if c["lag"] >= TH["lag_min"]], key=lambda c: -c["score"])[: TH["top_n"]]
-        cand_rows = "".join(coin_row(c, spark_ids, f'<td>{c["lag"]:.0f}%p</td><td>{"●" if c["above"] else "○"}</td>'
-                                     f'<td>{"—" if c["vol_ok"] is None else ("●" if c["vol_ok"] else "○")}</td>') for c in cands) \
-            or '<tr><td colspan="8" class="na">섹터 평균보다 크게 덜 오른 코인이 없음</td></tr>'
-        strong_note = "강한 섹터라 후보를 강조 대상에 포함합니다." if sec["strong"] else "강한 섹터가 아니라 후보를 강조하지 않습니다."
-        sig = "".join(f'<li class="{"hit" if c["ok"] else "na" if c["ok"] is None else "miss"}"><span>{"●" if c["ok"] else "—" if c["ok"] is None else "○"}</span><div><b>{esc(c["label"])}</b><small>{esc(c["why"])}</small></div></li>' for c in sec["early"])
-        sig_l = "".join(f'<li class="{"warnhit" if c["ok"] else "na" if c["ok"] is None else "miss"}"><span>{"●" if c["ok"] else "—" if c["ok"] is None else "○"}</span><div><b>{esc(c["label"])}</b><small>{esc(c["why"])}</small></div></li>' for c in sec["late"])
-        chain_kv = "" if s["kind"] != "체인" else (
-            f'<tr><td>스테이블코인 7일</td><td>{f_pct(sec.get("stable7"))}</td></tr>'
-            f'<tr><td>DEX 거래량 주간</td><td>{f_pct(sec.get("dex"))}</td></tr>'
-            f'<tr><td>TVL 7일 (가격 착시 포함)</td><td>{f_pct(sec.get("tvl7"))}</td></tr>')
-        sec_html.append(f"""
-<details class="sector" data-sec="{s["key"]}">{head}
- <p class="meta">{LABEL_SAY[sec["label"]]}. {strong_note}</p>
- <details class="inner" open><summary>덜 오른 후보</summary>
- <div class="tbl"><table class="list"><tr><th>코인</th><th>등급</th><th>7일</th><th>30일</th><th>덜 오름</th><th>평균가 위</th><th>거래량</th><th></th></tr>{cand_rows}</table></div></details>
- <details class="inner"><summary>지금 오르는 코인</summary>
- <div class="tbl"><table class="list"><tr><th>코인</th><th>등급</th><th>7일</th><th>30일</th><th></th></tr>{gain_rows}</table></div></details>
- <details class="inner"><summary>섹터 판정 근거 · 돈 유입 {sec["e"]}/{sec["avail"]} · 과열 {sec["l"]}/3</summary>
-  <ul class="sig">{sig}</ul><p class="c-sub">과열 신호</p><ul class="sig">{sig_l}</ul>
-  <table class="kv"><tr><td>섹터 중앙값 7일 / 30일</td><td>{f_pct(sec["med7"])} / {f_pct(sec["med30"])}</td></tr>
-  <tr><td>7일 상승 코인 비율</td><td>{sec["breadth"]:.0f}%</td></tr>
-  <tr><td>선물 OI / 24시간 변화</td><td>{f_usd(sec["oi"])} / {f_pct(sec["oi24"])}</td></tr>
-  <tr><td>펀딩 연환산</td><td>{f_pct(sec["fund_apr"])}</td></tr>{chain_kv}</table>
- </details>
-</details>""")
-
-    # 성적표
-    def brow(name, b):
-        rate = "—" if b["rate"] is None else f'{b["rate"]:.0f}%'
-        avg = f_pct(b["avg"], 1, True) if b["avg"] is not None else '<span class="na">—</span>'
-        return f'<tr><td>{name}</td><td>{b["total"]}</td><td>{b["n"]}</td><td>{rate}</td><td>{avg}</td></tr>'
-    old_note = f'<p class="na sm">이전 큰 버전의 기록 {board["old"]}개는 규칙이 달라 집계에서 뺐습니다.</p>' if board.get("old") else ""
-    board_html = f"""<h4>실전 기록 (v{major(VERSION)}.x 규칙)</h4><div class="tbl"><table class="list"><tr><th>구분</th><th>누적</th><th>7일 경과</th><th>승률</th><th>평균 초과</th></tr>
-{brow("지금 볼 것", red_b)}{brow("관심 목록", yel_b)}{brow("소형 (참고)", board["small"])}{brow("상승 초입 (실험)", board["exp"])}</table></div>{old_note}
-<h4>백테스트</h4>{bt_section(bt)}"""
-
-    gloss = "".join(f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in GLOSSARY)
-
-    sparks = {i: {"s": ctx["coins"][i]["sym"], "p": [round(x, 10) for x in ctx["coins"][i]["spark"]]}
-              for i in spark_ids if i in ctx["coins"] and ctx["coins"][i]["spark"]}
-    init = [p["a"]["id"] for p in picks["red"]][:3]
-    nodes, links, seen = [], [], set()
-    for sec in sectors:
-        if sec["label"] == "데이터 부족":
-            continue
-        nodes.append({"id": "s:" + sec["s"]["key"], "n": sec["s"]["name"], "t": "s", "st": sec["label"],
-                      "r": sec.get("rs30")})
-    secset = {n["id"] for n in nodes}
-    risky = {"주의", "과열 경고"}
-    for grp, items in (("red", picks["red"]), ("exp", exp), ("yellow", picks["yellow"]), ("small", small)):
-        for p in items:
-            a, sid = p["a"], "s:" + p["sec"]["s"]["key"]
-            if sid not in secset:
-                continue
-            if a["id"] not in seen:
-                seen.add(a["id"])
-                warn = p["sec"]["label"] in risky or (a["fund_apr"] or 0) >= 20 or (a.get("xc") and not a["xc"][0])
-                nodes.append({"id": a["id"], "n": a["sym"], "t": "c", "g": grp, "w": bool(warn), "mc": a["mc"]})
-            links.append([sid, a["id"]])
-    payload = json.dumps({"sp": sparks, "btc": btc.get("spark") or [], "init": init, "map": {"n": nodes, "l": links}},
-                         separators=(",", ":"), ensure_ascii=False)
-    nr, ny = len(picks["red"]), len(picks["yellow"])
-
-    return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes"><meta name="theme-color" content="#1e1e1e">
-<title>섹터 모니터 · {TEAM}</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
-<style>{CSS}</style></head><body><main class="note">
-<div class="top"><h1>섹터 모니터</h1><span class="ver">v{VERSION}</span><span class="sub">{SUBTITLE}</span></div>
-<nav class="jump"><a href="#now">지금 볼 것 <b>{nr}</b></a><a href="#exp">상승 초입 <b>{len(exp)}</b></a><a href="#watch">관심 <b>{ny}</b></a><a href="#sectors">섹터</a><a href="#score">성적표</a><a href="#rules">기준</a></nav>
-{props}
-{errs}
-{btc_block}
-<div class="layout">
-<aside class="side">
- <section class="panel"><div class="panel-h"><b>섹터 지도</b><span class="na sm">누르면 해당 코인으로 이동 · 끌어서 움직이기</span></div>
-  <div id="map" role="img" aria-label="섹터와 코인 상태 지도"></div>
-  <div class="legend"><span><i class="d g"></i>초입·상승 신호</span><span><i class="d b"></i>개선 중</span><span><i class="d p"></i>지금 볼 것</span><span><i class="d a"></i>주의</span><span><i class="d r"></i>과열</span><span><i class="d n"></i>중립</span></div></section>
- <details class="fold panel"{" open" if init else ""}><summary>비교 차트 <span class="na">최근 7일 · 점선은 BTC</span></summary>
- <div class="chart-wrap"><svg id="chart" viewBox="0 0 640 240" role="img" aria-label="7일 수익률 비교 차트"></svg><div id="legend"></div></div></details>
-</aside>
-<div class="main">
-<h2 id="now">지금 볼 것<small>모든 조건 통과 · 최대 {TH["red_max"]}개</small></h2>
-{focus}
-<h2 id="exp">상승 초입 후보<span class="exp-badge">실험</span><small>강한 섹터 + 신호 {TH["exp_min_hits"]}개 이상 · 신호 많은 순</small></h2>
-{exp_html}
-<h2 id="watch">관심 목록<small>핵심 조건 1개 미달 · 최대 {TH["yellow_max"]}개</small></h2>
-{watch}
-{small_html}
-<h2 id="sectors">섹터<small>오른쪽 숫자 = BTC 대비 30일 · 강한 순서</small></h2>
-{"".join(sec_html[:8])}
-{"" if len(sec_html) <= 8 else f'<details class="fold"><summary>나머지 섹터 {len(sec_html) - 8}개</summary>{"".join(sec_html[8:])}</details>'}
-<h2 id="score">도구 성적표</h2>
-<details class="fold"><summary>실전 기록 · 백테스트 펼치기</summary>{board_html}</details>
-<h2 id="rules">기준 · 용어</h2>
-<details class="fold"><summary>조건 기준 펼치기</summary>{rules_html()}</details>
-<details class="fold"><summary>용어 풀이 펼치기</summary><dl class="gloss">{gloss}</dl></details>
-</div>
-</div>
-<footer>
- <p class="brand"><b>{TEAM}</b><span class="na">·</span>Made by {AUTHOR}</p>
- <p class="na sm">{SUBTITLE}</p>
- <p>섹터 모니터 v{VERSION} · {RELEASED} 업데이트</p>
- <details class="inner"><summary>변경 이력</summary><p class="na sm">{esc(VERSION_RULE)}</p>{changelog_html()}</details>
- <p class="na sm">데이터: CoinGecko, DefiLlama, 각 거래소 공개 API. Data provided by CoinGecko. 모든 강조는 확률을 높이는 정황일 뿐 예측이 아닙니다.</p>
-</footer>
-</main>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
-<script>const D={payload};{JS}</script></body></html>"""
-
-
-CSS = r"""
-:root{--bg:#1e1e1e;--bg2:#262626;--bg3:#2e2e2e;--line:#363636;--text:#dcddde;--muted:#a3a3a3;--faint:#747474;
---accent:#a88bfa;--accent-bg:rgba(168,139,250,.10);--accent-line:rgba(168,139,250,.45);
---up:#5cc99a;--up-bg:rgba(92,201,154,.10);--down:#e5776e;--down-bg:rgba(229,119,110,.10);--amber:#e3b25c;--amber-bg:rgba(227,178,92,.10);--info:#6ea8e0;--info-bg:rgba(110,168,224,.09)}
-@media (prefers-color-scheme:light){:root{--bg:#ffffff;--bg2:#f6f6f6;--bg3:#efefef;--line:#e2e2e2;--text:#222;--muted:#5c5c5c;--faint:#8a8a8a;
---accent:#7652e8;--accent-bg:rgba(118,82,232,.07);--accent-line:rgba(118,82,232,.4);--up:#17895a;--up-bg:rgba(23,137,90,.08);--down:#c9463c;--down-bg:rgba(201,70,60,.07);--amber:#a8730f;--amber-bg:rgba(168,115,15,.08);--info:#2e6db0;--info-bg:rgba(46,109,176,.07)}}
-*{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%;scroll-behavior:smooth;scroll-padding-top:12px}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 "Pretendard Variable",Pretendard,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
-padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
-.note{max-width:760px;margin:0 auto;padding:28px 18px 56px}
-.top{display:flex;align-items:baseline;gap:10px}
-h1{font-size:1.7rem;font-weight:700;letter-spacing:-.02em;margin:0}
-.top{flex-wrap:wrap}.ver{font-size:.78rem;color:var(--accent);background:var(--accent-bg);padding:1px 8px;border-radius:999px}
-.sub{font-size:.78rem;color:var(--faint);letter-spacing:.01em}
-.exp-badge{font-size:.72rem;font-weight:600;color:var(--up);background:var(--up-bg);padding:1px 7px;border-radius:4px}
-.chip.hits{color:var(--text);background:var(--bg3);font-weight:600}
-svg.spark{flex:none;vertical-align:middle}svg.spark polyline{fill:none;stroke-width:1.5;stroke-linejoin:round}
-.sp-up polyline{stroke:var(--up)}.sp-dn polyline{stroke:var(--down)}
-.card-h svg.spark{margin-left:auto}.card-h svg.spark+.px{margin-left:0}
-li.row>svg.spark{float:right;margin:3px 0 0 10px}
-[data-coin].flash{animation:flash 1.4s ease}
-@keyframes flash{0%,40%{background:var(--accent-bg)}100%{background:transparent}}
-/* 레이아웃 */
-.layout{display:flex;flex-direction:column}
-.side{order:-1}
-.panel{background:var(--bg2);border-radius:8px;padding:10px 12px;margin:12px 0 4px}
-details.panel{border-bottom:0}details.panel>summary{padding:4px 0}
-.panel-h{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap}
-#map{width:100%;height:300px}
-#map text{font-size:10px;fill:var(--muted);pointer-events:none}#map text.sl{font-size:11px;fill:var(--text);font-weight:600}
-#map line{stroke:var(--line);stroke-width:1}#map circle{cursor:pointer;stroke:var(--bg2);stroke-width:1.5}
-.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:.74rem;color:var(--muted);margin-top:4px}
-.legend i.d{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
-.d.g{background:var(--up)}.d.b{background:var(--info)}.d.p{background:var(--accent)}.d.a{background:var(--amber)}.d.r{background:var(--down)}.d.n{background:var(--faint)}
-@media (min-width:1100px){
- .note{max-width:1320px;padding:32px 28px 60px}
- .layout{display:grid;grid-template-columns:minmax(0,1fr) 440px;gap:28px;align-items:start}
- .side{order:0;grid-column:2;grid-row:1;position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}
- .main{grid-column:1;grid-row:1}
- #map{height:440px}
-}
-h2{font-size:1.2rem;font-weight:650;letter-spacing:-.01em;margin:30px 0 8px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-h2 small{font-size:.78rem;font-weight:400;color:var(--faint)}
-h4{font-size:.9rem;font-weight:600;margin:14px 0 6px;color:var(--muted)}
-p{margin:.35em 0}
-a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
-.na{color:var(--faint)}.up{color:var(--up)}.down{color:var(--down)}.warn-text{color:var(--amber);font-weight:600}
-.nw{white-space:nowrap}.sm{font-size:.8rem}.sep{color:var(--faint);margin:0 6px}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;background:var(--bg3);padding:0 5px;border-radius:4px}
-/* 바로가기 */
-.jump{display:flex;gap:6px;overflow-x:auto;margin:12px 0 10px;padding-bottom:2px;-webkit-overflow-scrolling:touch}
-.jump a{flex:none;font-size:.82rem;color:var(--muted);background:var(--bg2);padding:4px 11px;border-radius:999px}
-.jump a b{color:var(--accent);font-weight:600;margin-left:2px}.jump a:hover{text-decoration:none;color:var(--text)}
-/* 상태 */
-.props{margin:0 0 10px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:4px 0}
-.props div{display:grid;grid-template-columns:84px 1fr;gap:10px;padding:3px 0;font-size:.85rem}
-.props dt{color:var(--muted)}.props dd{margin:0}
-.pill{display:inline-block;font-size:.76rem;padding:0 8px;border-radius:999px;margin:0 4px 2px 0;background:var(--bg3)}
-.pill.ok{color:var(--up)}.pill.bad{color:var(--faint);text-decoration:line-through}
-/* 콜아웃 */
-.callout{border-radius:6px;padding:12px 14px;margin:10px 0;background:var(--bg2)}
-.callout.slim{padding:9px 14px;font-size:.88rem}
-.callout.info{background:var(--info-bg)}.callout.info b{color:var(--info)}
-.callout.warn{background:var(--amber-bg)}.callout.warn b{color:var(--amber)}
-.callout.empty{color:var(--muted)}
-.callout .say{display:block;color:var(--muted);font-size:.82rem}
-.nums-s{color:var(--muted);font-size:.84rem;font-variant-numeric:tabular-nums;white-space:nowrap}
-.warnbox>summary{color:var(--amber)!important}.warnbox ul{margin:4px 0;padding-left:1.2em;font-size:.84rem;color:var(--muted)}
-/* 카드 */
-.card{border-radius:8px;padding:12px 14px;margin:10px 0;background:var(--bg2)}
-.card.focus{background:var(--accent-bg);box-shadow:inset 3px 0 0 var(--accent)}
-.card-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
-.card-h .sym{color:var(--accent);font-size:1.2rem}.c-icon{color:var(--accent);font-size:.85rem}
-.c-name{color:var(--muted);font-size:.85rem}.px{margin-left:auto;font-weight:600;font-variant-numeric:tabular-nums}
-.meta{font-size:.82rem;color:var(--muted);margin:3px 0}.card .meta .tier{margin-right:8px}
-.line{font-size:.85rem;margin:4px 0}.line .k{display:inline-block;min-width:34px;color:var(--faint);font-size:.78rem;margin-right:6px}
-.tag{display:inline-block;font-size:.76rem;color:var(--accent);background:var(--accent-bg);padding:0 7px;border-radius:999px;margin-right:6px;white-space:nowrap}
-.tier{font-size:.76rem;color:var(--muted)}
-/* 조건 칩 */
-.chips{display:flex;flex-wrap:wrap;gap:4px;margin:7px 0}
-.chip{font-size:.76rem;padding:1px 8px;border-radius:5px;white-space:nowrap;cursor:help}
-.chip em{font-style:normal;opacity:.85;font-variant-numeric:tabular-nums}
-.chip.ok{color:var(--up);background:var(--up-bg)}.chip.bad{color:var(--down);background:var(--down-bg)}.chip.na{color:var(--faint);background:var(--bg3)}
-.copy{font:inherit;font-size:.72rem;margin-left:4px;padding:0 6px;border-radius:4px;border:1px solid var(--line);background:none;color:var(--muted);cursor:pointer}
-/* 목록 행 */
-ul.rows{list-style:none;margin:0;padding:0}
-li.row{padding:9px 0;border-bottom:1px solid var(--line)}
-.row-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}.row-h .sym{font-size:.98rem}
-.row-f{display:flex;align-items:flex-end;gap:10px}.row-f .meta{flex:1}.row-f .act{font-size:.82rem;white-space:nowrap}
-li.row .chips{margin:5px 0 3px}li.row .meta{margin:0}
-.act a{margin-right:10px}
-.c-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
-.btn{display:inline-block;font:inherit;font-size:.84rem;padding:6px 13px;border-radius:6px;background:var(--accent);color:#fff;border:0;cursor:pointer}
-.btn:hover{text-decoration:none;filter:brightness(1.08)}
-.btn.ghost{background:transparent;color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent-line)}
-.btn.ghost[aria-pressed=true]{background:var(--accent-bg)}
-/* 접기 */
-details>summary{cursor:pointer;list-style:none}details>summary::-webkit-details-marker{display:none}
-details.sector,details.fold{border-bottom:1px solid var(--line)}
-details.sector>summary,details.fold>summary{display:flex;align-items:center;gap:10px;padding:10px 0;flex-wrap:wrap}
-details.fold>summary{font-size:.9rem}
-details.sector>summary::before,details.inner>summary::before,details.fold>summary::before{content:"";width:0;height:0;border-left:5px solid var(--faint);border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform .15s}
-details[open]>summary::before{transform:rotate(90deg)}
-details.sector[open],details.fold[open]{padding-bottom:12px}
-.s-name{font-weight:650;font-size:1rem}.kind{font-size:.72rem;color:var(--faint)}
-.s-rs{margin-left:auto;font-size:.82rem;color:var(--muted);font-variant-numeric:tabular-nums}
-.label{font-size:.75rem;font-weight:600;padding:1px 8px;border-radius:4px}
-.l-early{color:var(--accent);background:var(--accent-bg)}.l-improve{color:var(--info);background:var(--info-bg)}
-.l-neutral{color:var(--faint);background:var(--bg3)}.l-caution{color:var(--amber);background:var(--amber-bg)}.l-hot{color:var(--down);background:var(--down-bg)}
-details.inner{margin:8px 0}details.inner>summary{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:.84rem}
-/* 표 */
-.tbl{overflow-x:auto;-webkit-overflow-scrolling:touch}
-table{border-collapse:collapse;width:100%;font-size:.84rem;font-variant-numeric:tabular-nums}
-th{color:var(--faint);font-weight:500;text-align:left;font-size:.75rem;padding:5px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
-td{padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:top}
-td small{display:block;color:var(--faint);font-size:.72rem}
-td.act{text-align:right}
-.cmp:not(.btn){font:inherit;font-size:.8rem;background:none;border:0;color:var(--muted);cursor:pointer;padding:0}
-.cmp[aria-pressed=true]:not(.btn){color:var(--accent);font-weight:600}
-table.kv td:first-child{color:var(--muted);white-space:normal}
-ul.sig,ul.check{list-style:none;padding:0;margin:4px 0 8px}
-ul.sig li{display:flex;gap:10px;padding:3px 0;font-size:.88rem}ul.sig li>span{width:12px;flex:none}
-ul.sig small{display:block;color:var(--faint)}
-ul.sig li.hit>span{color:var(--up)}ul.sig li.warnhit>span{color:var(--down)}ul.sig li.miss>span,ul.sig li.na>span{color:var(--faint)}
-ul.check li{font-size:.86rem}ul.check li::before{content:"☐ ";color:var(--muted)}
-.c-sub{font-size:.78rem;color:var(--muted);margin:10px 0 2px;font-weight:600}
-/* 차트 */
-.chart-wrap{background:var(--bg2);border-radius:6px;padding:8px}
-#chart{width:100%;height:auto;display:block}
-#legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:.8rem;padding:6px 4px 0}
-#legend button{font:inherit;background:none;border:0;color:var(--text);cursor:pointer;padding:0}
-.gloss dt{font-weight:600;margin-top:10px;font-size:.9rem}.gloss dd{margin:2px 0 0;color:var(--muted);font-size:.86rem}
-/* 푸터 */
-footer{margin-top:36px;padding-top:14px;border-top:1px solid var(--line);font-size:.82rem;color:var(--muted)}
-footer .brand{font-size:.92rem;color:var(--text);display:flex;gap:8px;align-items:baseline}
-.cl{margin:8px 0}.cl ul{margin:2px 0;padding-left:1.2em}.cl li{margin:1px 0}
-@media (max-width:560px){.note{padding:18px 12px 48px}h1{font-size:1.45rem}.props div{grid-template-columns:76px 1fr}svg.spark{width:56px}#map{height:340px}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}html{scroll-behavior:auto}}
-"""
-
-JS = r"""
-const COLORS=['#a88bfa','#5cc99a','#e3b25c','#e5776e','#6ea8e0','#c8b45a'];
-const sel=new Set(D.init.filter(i=>D.sp[i]));
-function norm(p){return p.map(v=>(v/p[0]-1)*100)}
-function draw(){
-  const svg=document.getElementById('chart'),W=640,H=240,L=44,R=10,T=12,B=26;
-  const series=[...sel].slice(0,6).map((id,k)=>({id,name:D.sp[id].s,v:norm(D.sp[id].p),c:COLORS[k]}));
-  const btc=D.btc.length?norm(D.btc):null;
-  const all=series.flatMap(s=>s.v).concat(btc||[]);
-  if(!all.length){svg.innerHTML='<text x="320" y="120" text-anchor="middle" fill="currentColor" opacity=".5" font-size="14">목록의 비교 버튼으로 코인을 추가하세요</text>';document.getElementById('legend').innerHTML='';return}
-  let lo=Math.min(0,...all),hi=Math.max(0,...all);const pad=(hi-lo)*.08||1;lo-=pad;hi+=pad;
-  const y=v=>T+(hi-v)/(hi-lo)*(H-T-B),x=(i,n)=>L+i/(n-1)*(W-L-R);
-  const path=v=>v.map((p,i)=>(i?'L':'M')+x(i,v.length).toFixed(1)+' '+y(p).toFixed(1)).join('');
-  let g='';const step=Math.pow(10,Math.floor(Math.log10((hi-lo)/4)));const st=[1,2,5,10].map(m=>m*step).find(s=>(hi-lo)/s<=6);
-  for(let v=Math.ceil(lo/st)*st;v<=hi;v+=st){g+=`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="currentColor" opacity="${Math.abs(v)<1e-9?.35:.1}"/><text x="${L-6}" y="${y(v)+4}" text-anchor="end" font-size="11" fill="currentColor" opacity=".55">${v>0?'+':''}${+v.toFixed(1)}%</text>`}
-  g+=`<text x="${L}" y="${H-6}" font-size="11" fill="currentColor" opacity=".55">7일 전</text><text x="${W-R}" y="${H-6}" text-anchor="end" font-size="11" fill="currentColor" opacity=".55">지금</text>`;
-  if(btc)g+=`<path d="${path(btc)}" fill="none" stroke="currentColor" stroke-opacity=".45" stroke-width="1.5" stroke-dasharray="4 4"/>`;
-  series.forEach(s=>{g+=`<path d="${path(s.v)}" fill="none" stroke="${s.c}" stroke-width="2.2" stroke-linejoin="round"/>`});
-  svg.innerHTML=g;
-  document.getElementById('legend').innerHTML=series.map(s=>{const last=s.v[s.v.length-1];return `<button data-rm="${s.id}" title="눌러서 빼기"><span style="color:${s.c}">●</span> ${s.name} ${last>0?'+':''}${last.toFixed(1)}% ✕</button>`}).join('')+(btc?`<span style="opacity:.6">┄ BTC ${(btc[btc.length-1]>0?'+':'')+btc[btc.length-1].toFixed(1)}%</span>`:'');
-  document.querySelectorAll('.cmp').forEach(b=>b.setAttribute('aria-pressed',sel.has(b.dataset.id)));
-}
-function copyText(t){if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(t);
-  const a=document.createElement('textarea');a.value=t;a.style.position='absolute';a.style.left='-9999px';document.body.appendChild(a);a.select();
-  try{document.execCommand('copy')}finally{a.remove()}return Promise.resolve()}
-document.addEventListener('click',e=>{
-  const c=e.target.closest('.copy');
-  if(c){copyText(c.dataset.copy).then(()=>{const o=c.textContent;c.textContent='복사됨';setTimeout(()=>c.textContent=o,1200)});return}
-  const b=e.target.closest('.cmp');
-  if(b){const id=b.dataset.id;if(!D.sp[id])return;if(sel.has(id))sel.delete(id);else{if(sel.size>=6){alert('비교는 최대 6개까지');return}sel.add(id)}
-    const f=document.getElementById('chart').closest('details');if(f&&sel.size)f.open=true;draw();return}
-  const r=e.target.closest('[data-rm]');if(r){sel.delete(r.dataset.rm);draw()}
-});
-draw();
-function goto(sel){const el=document.querySelector(sel);if(!el)return;
-  const d=el.closest('details:not([open])');if(d)d.open=true;if(el.tagName==='DETAILS')el.open=true;
-  el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash')}
-function drawMap(){
-  const box=document.getElementById('map');if(!box)return;box.innerHTML='';
-  if(!window.d3){box.innerHTML='<p class="na sm">지도 라이브러리를 불러오지 못했습니다.</p>';return}
-  const cs=getComputedStyle(document.documentElement),v=n=>cs.getPropertyValue(n).trim();
-  const SC={'초입 정황':v('--up'),'개선 중':v('--info'),'중립':v('--faint'),'주의':v('--amber'),'과열 경고':v('--down')};
-  const CC={red:v('--accent'),exp:v('--up'),yellow:v('--info'),small:v('--muted')};
-  const W=box.clientWidth,H=box.clientHeight;
-  const nodes=D.map.n.map(d=>({...d})),links=D.map.l.map(([s,t])=>({source:s,target:t}));
-  const has=new Set(links.map(l=>l.source));
-  nodes.forEach(d=>{d.rad=d.t==='s'?(d.st==='중립'&&!has.has(d.id)?5:9):3+Math.max(0,Math.min(6,Math.log10((d.mc||5e7)/5e7)*2.2));
-    d.lab=d.t!=='s'||d.st!=='중립'||has.has(d.id)});
-  const svg=d3.select(box).append('svg').attr('viewBox',[0,0,W,H]).attr('width',W).attr('height',H);
-  const g=svg.append('g');
-  svg.call(d3.zoom().scaleExtent([.5,3]).on('zoom',e=>g.attr('transform',e.transform)));
-  const link=g.append('g').selectAll('line').data(links).join('line');
-  const node=g.append('g').selectAll('circle').data(nodes).join('circle').attr('r',d=>d.rad)
-    .attr('fill',d=>d.t==='s'?(SC[d.st]||v('--faint')):(d.w?v('--amber'):CC[d.g]))
-    .on('click',(e,d)=>goto(d.t==='s'?`details[data-sec="${d.id.slice(2)}"]`:`[data-coin="${d.id}"]`));
-  node.append('title').text(d=>d.t==='s'?`${d.n} · ${d.st}`:`${d.n}${d.w?' · 주의 필요':''}`);
-  const label=g.append('g').selectAll('text').data(nodes).join('text').attr('class',d=>d.t==='s'?'sl':'')
-    .attr('text-anchor','middle').text(d=>d.lab?d.n:'');
-  const sim=d3.forceSimulation(nodes).force('link',d3.forceLink(links).id(d=>d.id).distance(32).strength(.7))
-    .force('charge',d3.forceManyBody().strength(d=>d.t==='s'?-120:-30)).force('center',d3.forceCenter(W/2,H/2))
-    .force('collide',d3.forceCollide(d=>d.rad+(d.t==='s'?(d.lab?18:8):7))).force('x',d3.forceX(W/2).strength(.04)).force('y',d3.forceY(H/2).strength(.06));
-  node.call(d3.drag().on('start',(e,d)=>{if(!e.active)sim.alphaTarget(.3).restart();d.fx=d.x;d.fy=d.y})
-    .on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y}).on('end',(e,d)=>{if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null}));
-  const PX=Math.min(44,W*.1);
-  sim.on('tick',()=>{nodes.forEach(d=>{d.x=Math.max(PX,Math.min(W-PX,d.x));d.y=Math.max(14,Math.min(H-20,d.y))});
-    link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
-    node.attr('cx',d=>d.x).attr('cy',d=>d.y);label.attr('x',d=>d.x).attr('y',d=>d.y+d.rad+11)});
-}
-drawMap();let rt;window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(drawMap,300)});
-"""
+# ═════════════════════════ 페이지 ═════════════════════════
+COIN_KEYS = ["id", "sym", "name", "sec", "secs", "px", "mc", "vol", "c1", "c3", "c7", "c30", "c180", "ma20", "ma60", "ma100", "ma200",
+             "hi30", "brk", "slope", "hl", "rc", "vx", "spark", "ma20line", "z30", "z7", "srank", "sn", "mrank", "L", "fund", "oi", "sh",
+             "upx", "ex20", "uwarn", "under", "a20", "cvol", "cfirst", "sq", "sqn", "squeeze", "warns", "fatal", "hard", "sig", "nsig",
+             "score", "pull", "pullmiss", "reclaim", "kept", "run", "offpk", "tp", "tv", "src", "listwhy", "topRank"]
+
+
+def slim(c):
+    out = {}
+    for k in COIN_KEYS:
+        v = c.get(k)
+        if isinstance(v, float):
+            v = rnd6(v)
+        out["s" if k == "sym" else k] = v
+    return out
+
+
+def render(D):
+    data = json.dumps(D, ensure_ascii=False, separators=(",", ":"), default=lambda o: None).replace("</", "<\\/")
+    sections = "".join(f'<section role="tabpanel" id="p-{k}"{"" if k == "home" else " hidden"}></section>'
+                       for k in ["home", "early", "small", "pull", "list", "sec", "mkt", "bt", "chk"])
+    invite = (f'<a class="tg" href="{html.escape(TG_INVITE)}" target="_blank" rel="noopener">텔레그램 알림방 입장</a>' if TG_INVITE else "")
+    return f"""<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="color-scheme" content="dark">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>섹터 모니터 v{VERSION}</title><style>{CSS}</style></head><body>
+<div class="wrap">
+ <div class="head"><h1>섹터 모니터</h1><span class="ver">v{VERSION}</span>{invite}
+  <div class="search" role="search"><input id="q" type="search" placeholder="코인 검색 (심볼·이름)" aria-label="코인 검색" autocomplete="off"><div class="sres" id="sres" role="listbox"></div></div></div>
+ <p class="regime" id="regime"></p>
+ <div class="bar"><div class="tabs" role="tablist" id="tabs"></div><div class="filt" id="filt"></div></div>
+ {sections}
+ <footer id="foot"></footer></div>
+<dialog id="dlg" aria-label="코인 상세"><div class="dl" id="dlb"></div></dialog>
+<script>const D={data};
+{JS}</script></body></html>"""
 
 
 # ═════════════════════════ 실행 ═════════════════════════
 def main():
+    t0 = time.time()
     now = dt.datetime.fromtimestamp(NOW_TS, KST)
     today = now.strftime("%Y-%m-%d")
-    errors = []
+    yday_utc = utc_day(NOW_TS - DAY_S)
+    errors, src = [], {}
 
     state = load(os.path.join(DATA_DIR, "state.json"), {})
-    log = load(os.path.join(DATA_DIR, "log.json"), [])
-    dvol = load(os.path.join(DATA_DIR, "volume.json"), {})
-    cache = load(os.path.join(CACHE_DIR, "cache.json"), {})
+    if "flags" not in state and "top" not in state:   # 2.0 state → 3.0
+        state = {"started": state.get("started", NOW_TS)}
     state.setdefault("started", NOW_TS)
-    state.setdefault("oi_hist", [])
     state.setdefault("coin_oi", [])
-    phist = load(os.path.join(DATA_DIR, "price.json"), {})
+    log = load(os.path.join(DATA_DIR, "log.json"), [])
+    cache = load(os.path.join(CACHE_DIR, "cache.json"), {})
+    candles = load(os.path.join(CACHE_DIR, "candles.json"), {})   # 용량이 커서 git 대신 Actions 캐시에 보관
+    glob_hist = load(os.path.join(DATA_DIR, "global.json"), [])
     uhist = load(os.path.join(DATA_DIR, "upbit.json"), {})
 
-    def safe(label, fn, default):
+    def safe(label, fn, default, key=None):
         try:
-            return fn()
+            r = fn()
+            if key:
+                src[key] = ["ok", ""]
+            return r
         except Exception as e:
-            errors.append(f"{label}: {type(e).__name__} {str(e)[:100]}")
+            msg = f"{type(e).__name__} {str(e)[:90]}"
+            errors.append(f"{label}: {msg}")
+            if key:
+                src[key] = ["fail", msg]
             return default
 
-    cat_fresh = False
-    if MOCK:
-        btc, glob, cats, chain, fees, derivs, dstat = mock_world(NOW_TS // 3600)
-        if NOW_TS - cache.get("cat_ts", 0) >= CAT_REFRESH_S:
-            cache["cats"], cache["cat_ts"], cat_fresh = cats, NOW_TS, True
-        cats = cache["cats"]
+    def daily(key):
+        return NOW_TS - cache.get(key, 0) >= DAY_S - 1800
+
+    # 1) 가격 (매 실행)
+    markets = mock_markets() if MOCK else safe("시총 상위 1000개", fetch_markets, None, "CoinGecko 가격")
+    if markets:
+        cache["markets"], cache["mk_ts"] = markets, NOW_TS
     else:
-        btc = safe("BTC 가격", fetch_btc, {})
-        glob = safe("도미넌스", fetch_global, {})
-        # 카테고리 ID 확인 (하루 1번)
-        if NOW_TS - cache.get("catlist_ts", 0) >= DAY_REFRESH_S or not cache.get("ids"):
-            cl = safe("카테고리 목록", fetch_catlist, None)
-            if cl:
-                ids, missing = resolve_ids(cl)
-                cache["ids"], cache["catlist_ts"], cache["missing"] = ids, NOW_TS, missing
-        ids = cache.get("ids") or {s["key"]: s["cg"] for s in SECTORS}
-        if cache.get("missing"):
-            errors.append("CoinGecko에서 찾지 못한 섹터: " + ", ".join(cache["missing"]))
-        # 섹터별 코인 (4시간마다)
-        if NOW_TS - cache.get("cat_ts", 0) >= CAT_REFRESH_S or not cache.get("cats"):
+        markets = cache.get("markets") or {}
+        errors.append("가격을 받지 못해 지난 값으로 표시합니다")
+    if not markets:   # 처음 실행인데 가격을 못 받음 → 안내 페이지만 만들고 종료 (다음 실행에서 재시도)
+        os.makedirs(SITE_DIR, exist_ok=True)
+        with open(os.path.join(SITE_DIR, "index.html"), "w", encoding="utf-8") as f:
+            f.write('<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="dark"><body style="background:#1e1e1e;color:#ddd;font-family:sans-serif;padding:24px">'
+                    f'<h1>섹터 모니터 v{VERSION}</h1><p>가격 데이터를 받지 못했습니다. 다음 실행(2시간 뒤)에 다시 시도합니다.</p><ul>'
+                    + "".join(f"<li>{html.escape(e)}</li>" for e in NOTES + errors) + "</ul>")
+        print("가격 데이터 없음:", NOTES + errors)
+        return
+    # 2) 섹터 구성 (하루 1번)
+    if MOCK:
+        cache["sec_ids"] = mock_sector_ids()
+    elif daily("sec_ts") or not cache.get("sec_ids"):
+        cl = safe("카테고리 목록", fetch_catlist, None)
+        if cl:
+            ids, missing = resolve_ids(cl)
             new = {}
             for s in SECTORS:
                 if s["key"] in ids:
-                    rows = safe(f"섹터 {s['name']}", lambda c=ids[s["key"]]: fetch_category(c), None)
-                    if rows:
-                        new[s["key"]] = rows
+                    r = safe(f"섹터 {s['name']}", lambda c=ids[s["key"]]: fetch_category_ids(c), None)
+                    if r is not None:
+                        new[s["key"]] = r
             if new:
-                old = cache.get("cats", {})
+                old = cache.get("sec_ids") or {}
                 old.update(new)
-                cache["cats"], cache["cat_ts"], cat_fresh = old, NOW_TS, True
-        cats = cache.get("cats", {})
-        # 체인·수수료 (하루 1번)
-        if NOW_TS - cache.get("day_ts", 0) >= DAY_REFRESH_S:
-            chain = {}
-            for s in SECTORS:
-                if s.get("llama"):
-                    chain[s["key"]] = {"stable7": safe(f"스테이블 {s['name']}", lambda c=s["llama"]: fetch_stable(c), None),
-                                       "tvl7": safe(f"TVL {s['name']}", lambda c=s["llama"]: fetch_tvl(c), None),
-                                       "dex": safe(f"DEX {s['name']}", lambda c=s["dex"]: fetch_dex(c), None)}
-            fees_new = safe("수수료", fetch_fees, None)
-            cache["chain"], cache["day_ts"] = chain, NOW_TS
-            if fees_new:
-                cache["fees"], cache["fees7"] = fees_new
-        chain, fees = cache.get("chain", {}), cache.get("fees", {})
-        # 선물 (매시간)
-        wanted = {c["sym"] for rows in cats.values() for c in rows if c["mc"] >= TH["minor_mcap"]}
-        derivs, dstat = {}, {}
+                cache["sec_ids"], cache["sec_ts"], cache["missing"] = old, NOW_TS, missing
+                src["CoinGecko 섹터"] = ["ok", f"{len(new)}개 섹터"]
+    sec_ids = cache.get("sec_ids") or {}
+    if cache.get("missing"):
+        errors.append("CoinGecko에서 찾지 못한 섹터: " + ", ".join(cache["missing"]))
+    want = {i for s in SECTORS for i in (s.get("ids") or sec_ids.get(s["key"], []))}
+    extra = sorted(want - set(markets))
+    if extra and not MOCK:
+        more = safe("상위 1000위 밖 섹터 코인", lambda: fetch_markets_ids(extra), {})
+        markets.update(more)
+    # 3) 전체 시총·도미넌스 (매 실행, 60일 보관)
+    g = mock_global() if MOCK else safe("전체 시총", fetch_global, None, "CoinGecko 도미넌스")
+    if g and g.get("total"):
+        glob_hist = [r for r in glob_hist if NOW_TS - r["ts"] <= 62 * DAY_S] + [{"ts": NOW_TS, **g}]
+    # 4) 선물 (매 실행)
+    tracked = {i for i in want if i in markets and i != "bitcoin" and not excluded(markets[i]) and markets[i]["mc"] >= TH["minor_mcap"]}
+    derivs = {}
+    if MOCK:
+        derivs = mock_derivs(markets)
+    else:
+        wanted = {markets[i]["sym"] for i in tracked}
         for ex, fn in FETCHERS.items():
-            res = safe(f"{ex} 선물", lambda f=fn: f(wanted), None)
-            if res:
-                derivs[ex], dstat[ex] = res, "ok"
-            else:
-                dstat[ex] = "fail"
-
-    n_ok = sum(1 for v in dstat.values() if v == "ok")
-    user_check = bool(cache.get("listing")) or MOCK or any(dstat.get(v) == "ok" for v in ("Bitget", "OKX"))
-    if not user_check:
-        errors.append("상장 거래소 정보를 받지 못해 '상장' 기준을 건너뜀")
-
-    # 거래량 기록 (섹터 데이터가 새로 온 경우만, 하루 1칸)
-    all_rows = {}
-    for rows in cats.values():
-        for c in rows:
-            all_rows.setdefault(c["id"], c)
-    if cat_fresh:
-        for i, c in all_rows.items():
-            if c["mc"] >= TH["minor_mcap"]:
-                h = [x for x in dvol.get(i, []) if x[0] != today] + [[today, c["vol"]]]
-                dvol[i] = h[-8:]
-        dvol = {i: h for i, h in dvol.items() if i in all_rows}
-    coins = {i: analyze_coin(c, derivs, dvol, fees, today) for i, c in all_rows.items() if not excluded(c)}
-    # 체인·컨트랙트 주소 (하루 1번, 새 코인이 생기면 다음 날 반영)
-    want_ids = {i for i, c in coins.items() if c["mc"] >= TH["minor_mcap"]}
+            r = safe(f"{ex} 선물", lambda f=fn: f(wanted), None, f"{ex} 선물")
+            if r:
+                derivs[ex] = r
+    # 5) 상장 거래소 (하루 1번)
     if MOCK:
-        cache["plat"] = mock_platforms(want_ids)
-    elif NOW_TS - cache.get("plat_ts", 0) >= DAY_REFRESH_S or not cache.get("plat"):
-        pl = safe("체인 정보", lambda: fetch_platforms(want_ids), None)
-        if pl:
-            cache["plat"], cache["plat_ts"] = pl, NOW_TS
-    plat = cache.get("plat") or {}
-    # 상장 거래소 (하루 1번) · 업비트 거래대금 · CMC 교차확인 (섹터 데이터와 같은 4시간 주기)
-    if MOCK:
-        cache["listing"], upb_now = mock_extras(want_ids, NOW_TS // 3600)
-        _r = random.Random(NOW_TS // 86400)
-        cache["fees7"] = {k: v / 30 * 7 * _r.uniform(0.6, 1.8) for k, v in fees.items()}
-        cache["cmc"] = {c["sym"]: [[c["px"] * (1.06 if hash(i) % 13 == 0 else 1.0), c["vol"], c["mc"]]] for i, c in coins.items()}
-    else:
-        upb_now = None
-        if NOW_TS - cache.get("list_ts", 0) >= DAY_REFRESH_S or not cache.get("listing"):
-            new = {}
-            for v, ex in LIST_VENUES.items():
-                r = safe(f"{v} 상장 목록", lambda e=ex: fetch_listing(e), None)
-                if r:
-                    new[v] = r
-            if new:
-                old = cache.get("listing", {})
-                old.update(new)
-                cache["listing"], cache["list_ts"] = old, NOW_TS
-        if cat_fresh:
-            krw = (cache.get("listing", {}).get("Upbit") or {}).get("krw") or {}
-            if krw:
-                upb_now = safe("업비트 거래대금", lambda: fetch_upbit_krw(krw), None)
-            if CMC_KEY:
-                cm = safe("CoinMarketCap", fetch_cmc, None)
-                if cm:
-                    cache["cmc"] = cm
-        if not CMC_KEY:
-            errors.append("CoinMarketCap 키(CMC_API_KEY)가 없어 교차 확인을 건너뜀")
+        cache["listing"] = mock_listing(markets)
+    elif daily("list_ts") or not cache.get("listing"):
+        new = {}
+        for v, ex in LIST_VENUES.items():
+            r = safe(f"{v} 상장 목록", lambda e=ex: fetch_listing(e), None, f"{v} 상장 목록")
+            if r:
+                new[v] = r
+        if new:
+            old = cache.get("listing") or {}
+            old.update(new)
+            cache["listing"], cache["list_ts"] = old, NOW_TS
     listing = {v: set(d.get("ids", [])) for v, d in (cache.get("listing") or {}).items()}
-    cmc = cache.get("cmc") or {}
-    if cat_fresh:
-        for i, c in coins.items():   # 가격 이력 (하루 1칸, 최대 61일)
-            if c["mc"] >= TH["minor_mcap"] and c["px"]:
-                h = [x for x in phist.get(i, []) if x[0] != today] + [[today, c["px"]]]
-                phist[i] = h[-61:]
-        phist = {i: h for i, h in phist.items() if i in all_rows}
-        if upb_now:
-            for i, v in upb_now.items():
-                if v:
-                    h = [x for x in uhist.get(i, []) if x[0] != today] + [[today, v]]
-                    uhist[i] = h[-8:]
-    # 코인별 OI 24시간 변화
-    snap = {i: c["oi"] for i, c in coins.items() if c["oi"]}
-    prev_oi = min(state["coin_oi"], key=lambda h: abs(h["ts"] - (NOW_TS - 86400)), default=None)
-    if prev_oi and abs(prev_oi["ts"] - (NOW_TS - 86400)) > 3 * 3600:
-        prev_oi = None
+    # 6) 업비트 마켓·빗썸·상장 공지 (하루 1번)
+    if MOCK:
+        cache["upb_mk"], cache["bithumb"] = mock_upbit_markets(markets), []
+        cache["news"] = [{"d": today, "ex": "업비트", "t": "[거래] 모의 코인(MOCK) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)", "u": "https://upbit.com"}]
+    elif daily("kr_ts") or not cache.get("upb_mk"):
+        um = safe("업비트 마켓", fetch_upbit_markets, None, "업비트 마켓")
+        if um:
+            cache["upb_mk"] = um
+        bt = safe("빗썸 상장 목록", fetch_bithumb, None, "빗썸")
+        if bt:
+            cache["bithumb"] = bt
+        news = safe("업비트 공지", fetch_upbit_notices, [], "업비트 공지") + safe("바이낸스 공지", fetch_binance_notices, [], "바이낸스 공지")
+        if news:
+            cache["news"] = sorted(news, key=lambda n: n["d"], reverse=True)[:12]
+        if um:
+            cache["kr_ts"] = NOW_TS   # 실패하면 다음 실행에서 다시 시도
+    # 7) 업비트 원화 거래대금 (매 실행, 하루 1칸)
+    krw = ((cache.get("listing") or {}).get("Upbit") or {}).get("krw") or {}
+    upb_now = {} if MOCK else (safe("업비트 거래대금", lambda: fetch_upbit_krw(krw), {}, "업비트 거래대금") if krw else {})
+    if MOCK:
+        upb_now = {i: markets[i]["vol"] * 1300 * random.Random(i + today).uniform(0.02, 0.3) for i in listing.get("Upbit", [])}
+    for i, v in upb_now.items():
+        if v:
+            uhist[i] = ([x for x in uhist.get(i, []) if x[0] != today] + [[today, v]])[-8:]
+    upx = {}
+    for i, h in uhist.items():
+        prev = [v for d, v in h if d != today]
+        cur = next((v for d, v in h if d == today), None)
+        if cur and len(prev) >= 4 and statistics.mean(prev) > 0:
+            upx[i] = cur / statistics.mean(prev)
+    # 8) 거래소 일봉 (하루 1번, 마감된 봉만)
+    need = [i for i in sorted(tracked | ({"bitcoin"} & set(markets)), key=lambda i: -markets[i]["mc"]) if (candles.get(i) or {}).get("d", [""])[-1:] != [yday_utc]]
+    got = fails = cg_used = 0
+    cg_err = None
+    for i in need:
+        if time.time() - t0 > 11 * 60:
+            errors.append(f"시간 제한으로 일봉 {len(need) - got - fails}개는 다음 실행에서 받습니다")
+            break
+        if MOCK:
+            cd = mock_candles(i)
+        else:
+            cd = fetch_candles(markets[i])
+            if not cd and cg_used < CG_CANDLE_BUDGET:
+                cg_used += 1
+                try:
+                    cd = fetch_cg_candles(i)
+                except Exception as e:
+                    cd, cg_err = None, f"{type(e).__name__} {str(e)[:60]}"
+        if cd:
+            candles[i], got = cd, got + 1
+        else:
+            fails += 1
+    candles = {i: v for i, v in candles.items() if i in tracked or i == "bitcoin"}
+    if need:
+        src["거래소 일봉"] = ["ok" if got else "fail", f"새로 받음 {got} · 실패 {fails} · CoinGecko 대체 {cg_used}"]
+        if fails:
+            errors.append(f"일봉을 받지 못한 코인 {fails}개 (Bitget·OKX 미상장이고 CoinGecko 대체 한도 초과 또는 실패{': ' + cg_err if cg_err else ''})")
+    # 9) 코인별 OI 24시간 전
+    snap = {}
+    for i in tracked:
+        c = markets[i]
+        oi = sum(d[c["sym"]]["oi"] for d in derivs.values() if c["sym"] in d and px_match(d[c["sym"]]["px"], c["px"]))
+        if oi:
+            snap[i] = oi
+    prev = min(state["coin_oi"], key=lambda h: abs(h["ts"] - (NOW_TS - DAY_S)), default=None)
+    oi_prev = prev["oi"] if prev and abs(prev["ts"] - (NOW_TS - DAY_S)) <= 3 * 3600 else {}
     state["coin_oi"] = [h for h in state["coin_oi"] if NOW_TS - h["ts"] <= 30 * 3600] + [{"ts": NOW_TS, "oi": snap}]
-    fees7 = cache.get("fees7", {})
-    for i, c in coins.items():
-        c["plats"] = plat.get(i)
-        c["listed"] = sorted({v for v, ids in listing.items() if i in ids} | {v for v in ("Bitget", "OKX") if v in c["venues"]},
-                             key=USER_VENUES.index)
-        vh = [v for _, v in dvol.get(i, [])]
-        c["vtrend"] = statistics.mean(vh[-3:]) / statistics.mean(vh[:-3]) if len(vh) >= 6 and statistics.mean(vh[:-3]) > 0 else None
-        ph = [p for d, p in phist.get(i, []) if d != today][-TH["break_days"]:]
-        c["brk"] = None if len(ph) < TH["break_days"] - 5 or c["dd"] is None or not c["px"] else \
-            (c["dd"] <= TH["break_dd"] and c["px"] > max(ph))
-        f30, f7 = fees.get(i), fees7.get(i)
-        c["fee_up"] = f7 / (f30 / 30 * 7) if f30 and f7 is not None and i in fees7 else None
-        c["oi24c"] = pct(c["oi"], prev_oi["oi"].get(i)) if prev_oi and c["oi"] and prev_oi["oi"].get(i) else None
-        uh = uhist.get(i, [])
-        up = [v for d, v in uh if d != today]
-        cur = next((v for d, v in uh if d == today), None)
-        c["upx"] = cur / statistics.mean(up) if cur and len(up) >= 4 and statistics.mean(up) > 0 else None
-        c["xc"] = xcheck(c, cmc) if cmc else None
-
-    # 섹터 분석
-    oi_prev_snap = min(state["oi_hist"], key=lambda h: abs(h["ts"] - (NOW_TS - 86400)), default=None)
-    if oi_prev_snap and abs(oi_prev_snap["ts"] - (NOW_TS - 86400)) > 3 * 3600:
-        oi_prev_snap = None
-    sectors = []
-    for s in SECTORS:
-        if s["key"] not in cats:
-            continue
-        prev = (oi_prev_snap or {}).get("sec", {}).get(s["key"], {})
-        sectors.append(analyze_sector(s, cats[s["key"]], coins, btc, chain, prev, user_check, n_ok))
-    for sec in sectors:
-        sec["cands"] = [evaluate_candidate(a, t, sec) for a, t in sec["qual"]] if sec["label"] != "데이터 부족" else []
-
-    # 전체 강조 선정 (한 코인은 가장 점수 높은 섹터로 한 번만)
-    best = {}
-    for sec in sectors:
-        for c in sec["cands"]:
-            if c["grade"] and (c["a"]["id"] not in best or c["score"] > best[c["a"]["id"]]["score"]):
-                best[c["a"]["id"]] = c
-    ranked = sorted(best.values(), key=lambda c: -c["score"])
-    red = [c for c in ranked if c["grade"] == "red"][: TH["red_max"]]
-    red_ids = {c["a"]["id"] for c in red}
-    yellow = [c for c in ranked if c["a"]["id"] not in red_ids][: TH["yellow_max"]]
-    # 소형 코인(참고): 시총만 미달이고 나머지 규칙은 통과
-    sbest = {}
-    for sec in sectors:
-        for c in sec["cands"]:
-            if c["small_grade"] and (c["a"]["id"] not in sbest or c["score"] > sbest[c["a"]["id"]]["score"]):
-                sbest[c["a"]["id"]] = c
-    small = sorted(sbest.values(), key=lambda c: (c["small_grade"] != "red", -c["score"]))[:10]
-    ebest = {}
-    for sec in sectors:
-        for c in sec["cands"]:
-            k = (c["ehits"], c["score"])
-            if c["exp"] and (c["a"]["id"] not in ebest or k > (ebest[c["a"]["id"]]["ehits"], ebest[c["a"]["id"]]["score"])):
-                ebest[c["a"]["id"]] = c
-    exp = sorted(ebest.values(), key=lambda c: (-c["ehits"], -(c["a"]["c7"] or 0)))[: TH["exp_max"]]
-    picks = {"red": red, "yellow": yellow, "small": small, "exp": exp}
-
-    # 기록
-    sectors_by_key = {sec["s"]["key"]: sec for sec in sectors}
-    log, new_red = update_log(log, picks, coins, sectors_by_key, NOW_TS)
-    state["oi_hist"] = [h for h in state["oi_hist"] if NOW_TS - h["ts"] <= 30 * 3600] + [
-        {"ts": NOW_TS, "sec": {sec["s"]["key"]: sec.get("oi_by_ex", {}) for sec in sectors}}]
-    tg_err = telegram(new_red)
-    if tg_err:
-        errors.append(tg_err)
-
-    # 빈 상태 안내
-    days = (NOW_TS - state["started"]) / 86400
-    vol_ready = any(len(h) >= 6 for h in dvol.values())
-    if not any(s["strong"] for s in sectors):
-        empty = "지금은 돈이 들어오는 섹터가 없습니다. 억지로 찾지 않는 것이 정상입니다."
-    elif not vol_ready:
-        empty = f"거래량 비교 데이터를 모으는 중입니다. 약 {max(1, 6 - int(days))}일 뒤부터 강조가 나옵니다. 그동안 관심 목록을 참고하세요."
+    # 10) 상위 20개 거래소 중 상장 수 (하루 예산 안에서, 코인당 7일마다 갱신)
+    ex20c = cache.get("ex20") or {}
+    if MOCK:
+        top20 = [f"ex{i}" for i in range(20)]
+        for i in tracked:
+            ex20c[i] = [NOW_TS, [f"ex{k}" for k in range(20) if random.Random(i + str(k)).random() < 0.55]]
     else:
-        empty = f"강한 섹터는 있지만 시총 {f_usd_plain(TH['pick_mcap'])} 이상에서 모든 조건을 통과한 코인이 없습니다. 관심 목록을 참고하세요."
-    age_m = max(0, NOW_TS - cache["cat_ts"]) // 60 if cache.get("cat_ts") else None
-    cat_age = "없음" if age_m is None else (f"{age_m}분 전" if age_m < 60 else f"{age_m // 60}시간 전")
-    meta = {"obs": f"실전 {int(days) + 1}일째 (백테스트 확인 후 1~2주 점검 권장)", "cat_age": cat_age, "empty_reason": empty}
-    errors = NOTES + errors
+        if daily("top20_ts") or not cache.get("top20"):
+            t20 = safe("거래소 순위", fetch_top_exchanges, None, "거래소 순위")
+            if t20:
+                cache["top20"], cache["top20_ts"] = t20, NOW_TS
+        top20 = [x["id"] for x in cache.get("top20") or []]
+        order = [i for i in (state.get("shown") or []) if i in tracked] + sorted(tracked, key=lambda i: -markets[i]["mc"])
+        todo = [i for i in dict.fromkeys(order) if NOW_TS - (ex20c.get(i) or [0])[0] > 7 * DAY_S][:TICKER_BUDGET // 12 + 1]
+        for i in todo:
+            r = safe(f"{markets[i]['sym']} 거래소 목록", lambda c=i: fetch_coin_exchanges(c), None)
+            if r is not None:
+                ex20c[i] = [NOW_TS, r]
+    cache["ex20"] = {i: v for i, v in ex20c.items() if i in tracked}
+    ex20 = {i: len(set(v[1]) & set(top20)) for i, v in cache["ex20"].items()} if top20 else {}
 
-    board = scoreboard(log)
-    page = render({"now": now, "btc": btc, "glob": glob, "sectors": sectors, "picks": picks, "board": board,
-                   "dstat": dstat, "errors": errors, "meta": meta, "coins": coins,
-                   "bt": load(os.path.join(DATA_DIR, "backtest.json"), None)})
+    # 11) 판정 (숏 계정 비율은 후보만 추가로 받고 다시 계산)
+    args = dict(markets=markets, sec_ids=sec_ids, candles=candles, derivs=derivs, listing=listing, upx=upx, oi_prev=oi_prev,
+                ex20=ex20, upb_mk=cache.get("upb_mk") or {}, bithumb=set(cache.get("bithumb") or []), prev_state=state)
+    W = build_world(short={}, **args)
+    sq_c = sorted([c for c in W["coins"].values() if c["fund"] is not None and c["sqn"] >= 2], key=lambda c: -c["sqn"])[:30]
+    short, sfail = {}, 0
+    for c in sq_c:
+        if MOCK:
+            short[c["id"]] = random.Random(c["id"] + "sh").uniform(40, 65)
+            continue
+        try:
+            r = fetch_short_ratio(re.sub(r"[^A-Z0-9]", "", c["sym"]))
+            if r is not None:
+                short[c["id"]], sfail = r, 0
+        except Exception as e:
+            sfail += 1
+            if sfail >= 3 and not short:   # 연속 실패면 이번 실행은 건너뜀 (오류 한 줄만)
+                errors.append(f"Bitget 롱숏 비율: {type(e).__name__} {str(e)[:80]}")
+                src["Bitget 롱숏 비율"] = ["fail", type(e).__name__]
+                break
+        time.sleep(0.1)
+    if short:
+        src["Bitget 롱숏 비율"] = ["ok", f"{len(short)}개"]
+    if short:
+        W = build_world(short=short, **args)
+    M = market_view(W, markets, candles, glob_hist, candles.get("bitcoin"))
+
+    # 12) CMC 교차 확인 (하루 1번 요약)
+    if CMC_KEY and not MOCK and (daily("cmc_ts") or not cache.get("cmc_sum")):
+        cm = safe("CoinMarketCap", fetch_cmc, None, "CoinMarketCap")
+        if cm:
+            cache["cmc_sum"], cache["cmc_ts"] = cmc_summary(W["coins"], cm), NOW_TS
+    if not CMC_KEY and not MOCK:
+        src["CoinMarketCap"] = ["skip", "CMC_API_KEY 없음"]
+
+    # 13) 기록·알림
+    log, new_top = update_log(log, W)
+    tg = telegram(new_top)
+    if tg:
+        errors.append(tg)
+    state.update(W["state"])
+    shown = [c["id"] for c in W["top"] + W["early"] + W["small"] + W["listc"]]
+    shown += [i for i, c in sorted(W["coins"].items(), key=lambda kv: -(kv[1]["c7"] or 0))[:15]]
+    state["shown"] = list(dict.fromkeys(shown))[:80]
+
+    D = {"v": VERSION, "asof": now.strftime("%Y-%m-%d %H:%M"), "cday": yday_utc, "th": TH,
+         "coins": [slim(c) for c in W["coins"].values()], "secs": list(W["secs"].values()),
+         "top": [c["id"] for c in W["top"]], "early": [c["id"] for c in W["early"]], "small": [c["id"] for c in W["small"]],
+         "listc": [c["id"] for c in W["listc"]], "changes": W["changes"], "mk": W["mk"],
+         "excluded": sum(1 for c in W["coins"].values() if c["fatal"]), **M,
+         "board": scoreboard(log), "bt": load(os.path.join(DATA_DIR, "backtest.json"), None),
+         "news": cache.get("news") or [], "cmc": cache.get("cmc_sum"), "top20": [x["name"] for x in cache.get("top20") or []],
+         "src": src, "errors": NOTES + errors, "invite": TG_INVITE, "calls": CALLS["cg"],
+         "changelog": CHANGELOG, "rule": VERSION_RULE, "credit": CREDIT, "subtitle": SUBTITLE, "released": RELEASED}
+    for s in D["secs"]:
+        s.pop("_pri", None)
+    page = render(D)
 
     save(os.path.join(DATA_DIR, "state.json"), state)
     save(os.path.join(DATA_DIR, "log.json"), log)
-    save(os.path.join(DATA_DIR, "volume.json"), dvol)
-    save(os.path.join(DATA_DIR, "price.json"), phist)
+    save(os.path.join(CACHE_DIR, "candles.json"), candles)
+    save(os.path.join(DATA_DIR, "global.json"), glob_hist)
     save(os.path.join(DATA_DIR, "upbit.json"), uhist)
     save(os.path.join(CACHE_DIR, "cache.json"), cache)
     os.makedirs(SITE_DIR, exist_ok=True)
     with open(os.path.join(SITE_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(page)
-    print(f"완료 v{VERSION} {now:%Y-%m-%d %H:%M} | 지금 볼 것 {len(red)} | 관심 {len(yellow)} | 소형 {len(small)} | 실험 {len(exp)} | 섹터 {len(sectors)} | 거래소 {dstat}")
-    for e in errors:
+    print(f"완료 v{VERSION} {now:%Y-%m-%d %H:%M} | 추적 {len(W['coins'])} | Top {len(W['top'])} | 초입 {len(W['early'])} | "
+          f"소형 {len(W['small'])} | 상장 후보 {len(W['listc'])} | 섹터 {len(W['secs'])} | CoinGecko 호출 {CALLS['cg']} | {time.time() - t0:.0f}초")
+    for e in NOTES + errors:
         print(" -", e)
+
+
+CSS = r"""
+:root{--bg:#ffffff;--bg2:#f6f6f7;--bg3:#ececef;--line:#e0e0e4;--text:#1f1f22;--muted:#5b5b63;--faint:#8b8b93;
+--accent:#7652e8;--accent-bg:rgba(118,82,232,.08);--accent-line:rgba(118,82,232,.45);
+--up:#17895a;--down:#c9463c;--amber:#a8730f;--amber-bg:rgba(168,115,15,.09);--info:#2e6db0;--info-bg:rgba(46,109,176,.08)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1e1e1e;--bg2:#262626;--bg3:#303030;--line:#383838;--text:#dcddde;--muted:#a3a3a3;--faint:#767676;
+--accent:#a88bfa;--accent-bg:rgba(168,139,250,.11);--accent-line:rgba(168,139,250,.5);
+--up:#5cc99a;--down:#e5776e;--amber:#e3b25c;--amber-bg:rgba(227,178,92,.11);--info:#78b0e6;--info-bg:rgba(110,168,224,.11)}}
+:root[data-theme="dark"]{--bg:#1e1e1e;--bg2:#262626;--bg3:#303030;--line:#383838;--text:#dcddde;--muted:#a3a3a3;--faint:#767676;
+--accent:#a88bfa;--accent-bg:rgba(168,139,250,.11);--accent-line:rgba(168,139,250,.5);
+--up:#5cc99a;--down:#e5776e;--amber:#e3b25c;--amber-bg:rgba(227,178,92,.11);--info:#78b0e6;--info-bg:rgba(110,168,224,.11)}
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px);-webkit-text-size-adjust:100%}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 "Pretendard Variable",Pretendard,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:18px 16px 60px}
+a{color:var(--info)}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.num{font-variant-numeric:tabular-nums}
+.up{color:var(--up)}.dn{color:var(--down)}.na{color:var(--faint)}.sm{font-size:.8rem}
+/* 머리 */
+.head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.head h1{font-size:1.45rem;margin:0;letter-spacing:-.02em}
+.ver{font-size:.75rem;color:var(--accent);background:var(--accent-bg);padding:1px 8px;border-radius:999px}
+.mock{font-size:.75rem;color:var(--amber);background:var(--amber-bg);padding:2px 8px;border-radius:4px}
+.search{margin-left:auto;position:relative;flex:1 1 200px;max-width:280px}
+.search input{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg2);color:var(--text);font:inherit;font-size:.9rem}
+.sres{position:absolute;top:100%;left:0;right:0;z-index:30;background:var(--bg);border:1px solid var(--line);border-radius:8px;margin-top:4px;max-height:320px;overflow:auto;display:none}
+.sres button{display:flex;width:100%;gap:8px;align-items:baseline;padding:8px 10px;border:0;background:none;text-align:left;cursor:pointer}
+.sres button:hover,.sres button:focus{background:var(--bg2)}
+/* 국면 한 줄 */
+.regime{margin:14px 0 0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--bg2);border-radius:0 8px 8px 0}
+.regime b{font-weight:650}
+.regime .sub{display:block;font-size:.8rem;color:var(--muted);margin-top:2px}
+/* 탭 + 필터 (고정) */
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--bg);margin:12px -16px 0;padding:0 16px;border-bottom:1px solid var(--line)}
+.tabs{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:none;border:0;background:none;padding:10px 11px 9px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;font-size:.92rem;white-space:nowrap}
+.tabs button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.tabs .c{font-size:.72rem;color:var(--faint);margin-left:3px}
+.filt{display:flex;gap:6px 14px;align-items:center;flex-wrap:wrap;padding:7px 0 9px;font-size:.84rem;color:var(--muted)}
+.filt label{display:inline-flex;align-items:center;gap:4px;cursor:pointer;color:var(--text)}
+.filt input{accent-color:var(--accent);width:15px;height:15px;margin:0}
+.filt .hid{margin-left:auto;color:var(--faint);font-size:.78rem}
+section[role="tabpanel"]{padding-top:16px}
+h2{font-size:1.1rem;margin:0 0 4px;letter-spacing:-.01em}
+h3{font-size:.95rem;margin:20px 0 6px}
+.lead{color:var(--muted);font-size:.86rem;margin:0 0 12px;max-width:68ch}
+details.rule{font-size:.82rem;color:var(--muted);margin:0 0 12px}
+details.rule summary{cursor:pointer;color:var(--info)}
+details.rule ul{margin:6px 0 0;padding-left:18px}
+/* 칩 */
+.chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.chip{font-size:.74rem;padding:1px 7px;border-radius:4px;background:var(--bg3);color:var(--faint);white-space:nowrap}
+.chip.ok{background:var(--info-bg);color:var(--info)}
+.chip.warn{background:var(--amber-bg);color:var(--amber)}
+.chip.hot{background:var(--accent-bg);color:var(--accent)}
+.ex{font-size:.7rem;padding:0 5px;border:1px solid var(--line);border-radius:3px;color:var(--muted)}
+.ex.off{opacity:.35;text-decoration:line-through}
+.secchip{font-size:.76rem;color:var(--muted)}
+/* 추천 카드 */
+.picks{display:grid;gap:10px;grid-template-columns:1fr}
+@media (min-width:760px){.picks{grid-template-columns:repeat(3,1fr)}}
+.pick{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;border:1px solid var(--accent-line);border-radius:10px;padding:12px;cursor:pointer;background:var(--bg);text-align:left;width:100%}
+.pick:hover{background:var(--accent-bg)}
+.pick .t{display:flex;align-items:baseline;gap:6px}
+.pick .rk{font-size:.75rem;color:var(--accent);font-weight:700}
+.pick .sym{font-size:1.15rem;font-weight:700}
+.pick .rt{display:flex;gap:10px;font-size:.84rem;margin-top:4px}
+.pick .why{font-size:.82rem;color:var(--muted);margin:6px 0 0}
+.pick .stop{font-size:.78rem;color:var(--faint);margin-top:6px}
+.empty{padding:16px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);font-size:.88rem}
+/* 코인 표 */
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:.86rem}
+th{font-weight:500;color:var(--faint);font-size:.76rem;text-align:right;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th button{border:0;background:none;color:inherit;cursor:pointer;padding:0;font-size:inherit}
+th button[aria-sort]{color:var(--text)}
+td{padding:8px;border-bottom:1px solid var(--line);text-align:right;vertical-align:top;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+tr.row{cursor:pointer}tr.row:hover td{background:var(--bg2)}
+td .nm{font-weight:650}
+td .chips{margin-top:3px;max-width:340px;white-space:normal}
+.vbar{display:inline-block;width:44px;height:6px;background:var(--bg3);border-radius:3px;vertical-align:middle;margin-left:5px;overflow:hidden}
+.vbar i{display:block;height:100%;background:var(--info)}
+.tog{display:inline-flex;gap:6px;align-items:center;font-size:.84rem;margin:0 0 10px;cursor:pointer}
+.tog input{accent-color:var(--accent)}
+/* 이평 사다리 */
+.ladder{position:relative;height:40px;margin:6px 0 2px;min-width:220px}
+.ladder .ln{position:absolute;left:0;right:0;top:20px;height:1px;background:var(--line)}
+.ladder .m{position:absolute;top:13px;width:1px;height:15px;background:var(--faint)}
+.ladder .m span{position:absolute;top:-14px;left:50%;transform:translateX(-50%);font-size:.66rem;color:var(--faint);white-space:nowrap}
+.ladder .m.sup{background:var(--info);width:2px}
+.ladder .m.sup span{color:var(--info);font-weight:600}
+.ladder .p{position:absolute;top:15px;width:11px;height:11px;margin-left:-5px;border-radius:50%;background:var(--text);border:2px solid var(--bg)}
+.ladder .p span{position:absolute;top:13px;left:50%;transform:translateX(-50%);font-size:.66rem;white-space:nowrap;font-weight:600}
+.pl{display:grid;gap:10px}
+.pc{border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:pointer;background:var(--bg);width:100%;text-align:left}
+.pc:hover{background:var(--bg2)}
+.pc .t{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.state{font-size:.78rem;font-weight:600;padding:1px 7px;border-radius:4px}
+.state.hold{color:var(--info);background:var(--info-bg)}.state.lost{color:var(--down);background:var(--bg3)}.state.turn{color:var(--accent);background:var(--accent-bg)}.state.bounce{color:var(--amber);background:var(--amber-bg)}
+/* 섹터 */
+.sec{display:grid;grid-template-columns:28px 1fr;gap:0 8px;padding:9px 0;border-bottom:1px solid var(--line)}
+.sec .n{color:var(--faint);font-size:.82rem;padding-top:2px;text-align:right}
+.sec .h{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.sec .nm{font-weight:650}
+.sbar{height:5px;background:var(--bg3);border-radius:3px;margin:5px 0 0;max-width:420px;overflow:hidden}
+.sbar i{display:block;height:100%;background:var(--faint)}
+.sec.top .sbar i{background:var(--accent)}
+.tagtop{font-size:.72rem;color:var(--accent)}
+/* 시장 */
+.grid2{display:grid;gap:14px;grid-template-columns:1fr}
+@media (min-width:760px){.grid2{grid-template-columns:1fr 1fr}}
+.box{border:1px solid var(--line);border-radius:10px;padding:12px}
+.box h3{margin:0 0 8px}
+.kv{display:flex;justify-content:space-between;gap:10px;font-size:.88rem;padding:4px 0;border-bottom:1px dashed var(--line)}
+.kv:last-child{border-bottom:0}
+.gauge{position:relative;height:10px;border-radius:5px;background:linear-gradient(90deg,var(--bg3) 0 25%,var(--bg2) 25% 75%,var(--accent-bg) 75%);border:1px solid var(--line);margin:22px 0 6px}
+.gauge i{position:absolute;top:-6px;width:3px;height:20px;background:var(--text);border-radius:2px}
+.gauge span{position:absolute;top:-22px;transform:translateX(-50%);font-size:.78rem;font-weight:700}
+.gl{display:flex;justify-content:space-between;font-size:.72rem;color:var(--faint)}
+.tier{display:grid;grid-template-columns:62px 1fr 56px;gap:8px;align-items:center;font-size:.85rem;padding:4px 0}
+.tier .b{height:8px;position:relative;background:var(--bg2);border-radius:2px}
+.tier .b i{position:absolute;top:0;height:100%;border-radius:2px}
+.tier .b::after{content:"";position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:var(--faint)}
+/* 성적표 */
+.score{padding:12px 0;border-bottom:1px solid var(--line)}
+.score .h{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.score p{margin:4px 0 0;font-size:.88rem;max-width:70ch}
+.flip{position:relative;height:8px;background:var(--bg3);border-radius:4px;margin:10px 0 2px;max-width:420px}
+.flip i{position:absolute;left:0;top:0;height:100%;border-radius:4px;background:var(--info)}
+.flip b{position:absolute;left:50%;top:-4px;bottom:-4px;width:2px;background:var(--text)}
+.verdict{font-size:.76rem;font-weight:600;padding:1px 7px;border-radius:4px}
+.v-ok{color:var(--up);background:var(--bg3)}.v-hold{color:var(--amber);background:var(--amber-bg)}.v-no{color:var(--down);background:var(--bg3)}
+/* 상세 시트 */
+dialog{border:0;padding:0;width:min(560px,100%);max-height:88vh;border-radius:14px;background:var(--bg);color:var(--text);box-shadow:0 10px 40px rgba(0,0,0,.35)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+@media (max-width:600px){dialog{margin:auto 0 0;border-radius:14px 14px 0 0;max-width:100%}}
+.dl{padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px));overflow:auto;max-height:88vh}
+.dl .top{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.dl .top b{font-size:1.3rem}
+.dl .x{margin-left:auto;border:0;background:var(--bg2);border-radius:6px;padding:4px 10px;cursor:pointer}
+.dl h4{font-size:.82rem;color:var(--muted);font-weight:600;margin:14px 0 4px}
+.dl .links{display:flex;gap:8px;margin-top:14px}
+.dl .links a{flex:1;text-align:center;padding:9px;border-radius:8px;background:var(--bg2);text-decoration:none;font-size:.88rem}
+.dl .links a.pri{background:var(--accent);color:#fff}
+/* 하단 */
+footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);font-size:.8rem;color:var(--muted)}
+footer table{font-size:.8rem}
+footer td{white-space:normal}footer td:last-child{white-space:nowrap}
+@media (prefers-reduced-motion:no-preference){.pick,.pc,tr.row td{transition:background .15s}}
+.tg{display:inline-flex;align-items:center;gap:5px;font-size:.8rem;padding:4px 10px;border-radius:999px;background:var(--info-bg);color:var(--info);text-decoration:none}
+.eg{font-size:.66rem;color:var(--amber);border:1px solid currentColor;border-radius:3px;padding:0 3px;margin-left:3px;vertical-align:1px;font-style:normal}
+svg.spark{flex:none;vertical-align:middle;overflow:visible}
+svg.spark .p{fill:none;stroke-width:1.6;stroke-linejoin:round}
+svg.spark .m{fill:none;stroke:var(--faint);stroke-width:1;stroke-dasharray:2 2}
+.sp-up .p{stroke:var(--up)}.sp-dn .p{stroke:var(--down)}
+.pick .t svg.spark{margin-left:auto}
+td.sp{width:96px}
+/* 구간 색 사다리 */
+.zl{position:relative;height:46px;margin:8px 0 2px;min-width:230px}
+.zl .z{position:absolute;top:14px;height:14px;border-radius:2px;opacity:.9}
+.z0{background:color-mix(in srgb,var(--up) 50%,transparent)}
+.z1{background:color-mix(in srgb,var(--amber) 50%,transparent)}
+.z2{background:color-mix(in srgb,var(--down) 45%,transparent)}
+.zl .m{position:absolute;top:10px;width:2px;height:22px;background:var(--text)}
+.zl .m span{position:absolute;top:-13px;left:50%;transform:translateX(-50%);font-size:.66rem;color:var(--muted);white-space:nowrap}
+.zl .p{position:absolute;top:15px;width:12px;height:12px;margin-left:-6px;border-radius:50%;background:var(--accent);border:2px solid var(--bg)}
+.zl .p span{position:absolute;top:13px;left:50%;transform:translateX(-50%);font-size:.66rem;white-space:nowrap;font-weight:700;color:var(--accent)}
+.zleg{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:.72rem;color:var(--muted)}
+.zleg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.tvb{display:inline-block;font-size:.72rem;padding:2px 7px;border-radius:4px;background:var(--bg3);color:var(--text);text-decoration:none;white-space:nowrap}
+.tvb:hover{background:var(--accent-bg);color:var(--accent)}
+.ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 10px;font-size:.82rem;color:var(--muted)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.seg button{border:0;background:none;padding:4px 9px;cursor:pointer;font-size:.8rem;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--accent-bg);color:var(--accent);font-weight:600}
+details.sd>summary{list-style:none;cursor:pointer}
+details.sd>summary::-webkit-details-marker{display:none}
+details.sd[open] .sec{border-bottom:0}
+.slist{margin:0 0 10px 36px;border-left:2px solid var(--line);padding-left:10px}
+.slist .r{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:.84rem;border-bottom:1px dashed var(--line)}
+.slist .r:last-child{border-bottom:0}
+.slist .r b{min-width:74px}
+.slist .r .g{margin-left:auto;display:flex;gap:10px;align-items:center}
+.chg{font-size:.85rem;padding:6px 0;border-bottom:1px dashed var(--line)}
+.chg b{margin-right:6px}
+.alert{border:1px solid var(--amber);background:var(--amber-bg);border-radius:8px;padding:10px 12px;font-size:.86rem;margin:0 0 14px}
+
+.tiers{display:grid;gap:6px}
+.tr{display:grid;grid-template-columns:120px auto 1fr auto;gap:10px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line)}
+.tr:last-child{border-bottom:0}
+.tn{display:flex;flex-direction:column;line-height:1.3}
+.tw{display:flex;gap:3px}
+.wk{display:inline-block;width:38px;text-align:center;font-size:.72rem;padding:4px 0;border-radius:4px;font-variant-numeric:tabular-nums}
+.tv{display:flex;flex-direction:column;font-size:.8rem;line-height:1.35}
+@media (max-width:600px){.tr{grid-template-columns:1fr auto}.tv,.tl{grid-column:span 2}.tv{flex-direction:row;gap:10px}}
+
+.hb{position:relative;display:inline-block;height:10px;background:var(--bg3);border-radius:5px;overflow:hidden;width:100%}
+.hb i{position:absolute;left:0;top:0;height:100%;border-radius:5px}
+.hb b{position:absolute;top:0;bottom:0;width:2px;background:var(--text)}
+.hg{display:grid;grid-template-columns:auto 1fr 44px;gap:6px 10px;align-items:center;font-size:.84rem}
+.hv{text-align:right}
+.bh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px}.bh h3{margin:0}
+.tb{display:grid;grid-template-columns:96px 1fr 150px auto;gap:10px;align-items:center;padding:7px 0;border-bottom:1px dashed var(--line)}
+.tb:last-of-type{border-bottom:0}
+.tbars{display:grid;gap:3px}.br{display:grid;grid-template-columns:1fr 56px;gap:6px;align-items:center;font-size:.78rem}
+.db{position:relative;display:block;height:9px}.db i{position:absolute;top:0;height:100%;border-radius:2px}
+.db::after{content:"";position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--faint)}
+.tvx{display:grid;grid-template-columns:auto 1fr 40px;gap:6px;align-items:center}
+.gauge.cg{background:linear-gradient(90deg,var(--amber) 0%,color-mix(in srgb,var(--amber) 40%,var(--bg3)) 25%,var(--bg3) 25%,var(--bg3) 75%,color-mix(in srgb,var(--accent) 50%,var(--bg3)) 75%,var(--accent) 100%)}
+.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:6px}
+.tile{display:flex;flex-direction:column;gap:2px;padding:8px;border-radius:8px;border:1px solid var(--line)}
+.tile b{font-size:1rem}.tile.ok b{color:var(--up)}.tile.no b{color:var(--down)}
+.rot{display:grid;grid-template-columns:1fr 48px;gap:8px;align-items:center}
+.bt{display:grid;grid-template-columns:150px 1fr 40px 60px 34px minmax(0,1.3fr);gap:8px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line);font-size:.84rem}
+.btn{display:flex;flex-direction:column;gap:2px}.bt .flip{margin:0}
+@media (max-width:640px){.tb{grid-template-columns:80px 1fr}.tvx{grid-column:span 2}.bt{grid-template-columns:110px 1fr 40px 56px}.bt>.sm,.bt>.na{display:none}.hg{grid-template-columns:110px 1fr 40px}}
+
+.steps{display:grid;grid-template-columns:repeat(8,1fr);gap:4px;margin-top:4px}
+.st{position:relative;display:flex;flex-direction:column;gap:2px;padding:8px 6px 10px;border-radius:8px;background:var(--bg2);overflow:hidden;font-size:.74rem;line-height:1.3}
+.st .dot{width:20px;height:20px;border-radius:50%;background:var(--bg3);display:grid;place-items:center;font-size:.72rem;font-weight:700}
+.st .sn{font-weight:600;color:var(--muted)}.st .sa{color:var(--faint);font-size:.68rem}
+.st i{position:absolute;left:0;bottom:0;height:3px;background:var(--faint)}
+.st.on{background:var(--accent-bg);outline:1px solid var(--accent-line)}.st.on .dot{background:var(--accent);color:#fff}.st.on .sn{color:var(--text)}.st.on i{background:var(--accent)}
+.st.nx{outline:1px dashed var(--accent-line)}.st.nx i{background:var(--accent-line)}
+@media (max-width:700px){.steps{grid-template-columns:repeat(4,1fr)}}
+.tier{display:grid;grid-template-columns:62px 1fr 56px;gap:8px;align-items:center;font-size:.85rem;padding:5px 0}
+:root,:root[data-theme]{color-scheme:dark;--bg:#1e1e1e;--bg2:#262626;--bg3:#303030;--line:#383838;--text:#dcddde;--muted:#a3a3a3;--faint:#767676;--accent:#a88bfa;--accent-bg:rgba(168,139,250,.11);--accent-line:rgba(168,139,250,.5);--up:#5cc99a;--down:#e5776e;--amber:#e3b25c;--amber-bg:rgba(227,178,92,.11);--info:#78b0e6;--info-bg:rgba(110,168,224,.11)}
+.z0{background:color-mix(in srgb,var(--up) 55%,transparent)}.z1{background:color-mix(in srgb,var(--up) 28%,transparent)}
+.z2{background:color-mix(in srgb,var(--amber) 45%,transparent)}.z3{background:color-mix(in srgb,var(--down) 30%,transparent)}.z4{background:color-mix(in srgb,var(--down) 55%,transparent)}
+footer details.rule h4{margin:10px 0 2px}
+"""
+
+JS = r""""use strict";
+const TH=D.th;
+const EXS=[["U","업비트"],["G","Bitget"],["O","OKX"],["B","Binance"]];
+const SX={};D.secs.forEach(s=>SX[s.k]=s);
+const C=D.coins;const CM={};C.forEach(c=>CM[c.id]=c);
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const f1=(v,d=1)=>v==null?"—":(v>0?"+":"")+v.toFixed(d)+"%";
+const cls=v=>v==null?"na":v>0?"up":v<0?"dn":"";
+const usd=v=>v==null?"—":v>=1e9?"$"+(v/1e9).toFixed(1)+"B":v>=1e6?"$"+Math.round(v/1e6)+"M":"$"+Math.round(v).toLocaleString();
+const px=v=>v==null?"—":v>=100?v.toLocaleString("en-US",{maximumFractionDigits:1}):v>=1?v.toFixed(3):v>=.01?v.toFixed(4):v.toPrecision(4);
+const chip=(t,k="")=>`<span class="chip ${k}">${esc(t)}</span>`;
+const big$=v=>v==null?"—":v>=1e9?"$"+(v/1e9).toFixed(1)+"B":"$"+Math.round(v/1e6)+"M";
+const OK=v=>v===true;
+
+/* 거래소 필터 */
+let EXON={U:true,G:true,O:true,B:true};
+try{const v=JSON.parse(localStorage.getItem("charon-ex")||"null");if(v)EXON=v;}catch(e){}
+const shown=c=>[...(c.L||"")].some(k=>EXON[k]);
+const exBadges=c=>EXS.map(([k,n])=>(c.L||"").includes(k)?`<span class="ex">${n}</span>`:"").join(" ");
+function tv(c){
+  if(c.tv)return "https://www.tradingview.com/chart/?symbol="+encodeURIComponent(c.tv);
+  const L=c.L||"",k=L.includes("G")?"BITGET":L.includes("O")?"OKX":L.includes("B")?"BINANCE":L.includes("U")?"UPBIT":null;
+  return k?`https://www.tradingview.com/chart/?symbol=${k}:${c.s}${k==="UPBIT"?"KRW":"USDT"}`:`https://www.coingecko.com/en/coins/${c.id}`;}
+const tvBtn=c=>`<a class="tvb" href="${tv(c)}" target="_blank" rel="noopener">차트</a>`;
+
+/* 목록 */
+const live=C.filter(c=>!c.fatal);
+const byIds=ids=>(ids||[]).map(id=>CM[id]).filter(Boolean);
+const TOP=byIds(D.top);
+const EARLY=byIds(D.early),SMALL=byIds(D.small),LISTC=byIds(D.listc);
+const PULL=live.filter(c=>c.pull).sort((a,b)=>({hold:0,wait:1,lost:2}[a.pull.st]-{hold:0,wait:1,lost:2}[b.pull.st])||b.pull.qn-a.pull.qn);
+const NEAR=live.filter(c=>c.pullmiss).sort((a,b)=>a.pullmiss.length-b.pullmiss.length||a.hi30-b.hi30).slice(0,TH.near_max);
+const RECL=live.filter(c=>c.reclaim).sort((a,b)=>(b.reclaim.st==="turn")-(a.reclaim.st==="turn")||b.reclaim.qn-a.reclaim.qn||b.mc-a.mc).slice(0,10);
+
+/* 그림 */
+function spark(c,w=88,h=24){
+  const p=c.spark,m=c.ma20line||[];if(!p||p.length<2)return "";
+  const all=p.concat(m);const lo=Math.min(...all),hi=Math.max(...all),r=hi-lo||1;
+  const X=(i,n)=>(i/(n-1)*w).toFixed(1),Y=v=>(h-(v-lo)/r*h).toFixed(1);
+  const pl=p.map((v,i)=>X(i,p.length)+","+Y(v)).join(" ");
+  const off=p.length-m.length;const ml=m.map((v,i)=>X(i+off,p.length)+","+Y(v)).join(" ");
+  return `<svg class="spark ${p[p.length-1]>=p[0]?"sp-up":"sp-dn"}" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="최근 30일 가격, 점선은 20일선"><polyline class="m" points="${ml}"/><polyline class="p" points="${pl}"/></svg>`;
+}
+const LEG=`<div class="zleg"><span class="na">← 높은 가격 · 낮은 가격 →</span><span><i class="z0"></i>모든 이평 위</span><span><i class="z1"></i></span><span><i class="z2"></i></span><span><i class="z3"></i></span><span><i class="z4"></i>모든 이평 아래</span></div>`;
+function ladder(c,leg=true){
+  const lv=[["20",c.ma20],["60",c.ma60],["100",c.ma100],["200",c.ma200]].filter(x=>x[1]);
+  if(!lv.length||!c.px)return `<p class="sm na">일봉 기록이 부족합니다</p>`;
+  const vals=lv.map(x=>x[1]).concat(c.px);const lo=Math.min(...vals)*.96,hi=Math.max(...vals)*1.04;
+  const pos=v=>(hi-v)/(hi-lo)*100;
+  const cuts=lv.map(x=>x[1]).sort((a,b)=>b-a);const edges=[hi,...cuts,lo];let z="";
+  const zc=i=>Math.round(i*4/cuts.length);
+  for(let i=0;i<edges.length-1;i++){const a=pos(edges[i]),b=pos(edges[i+1]);z+=`<div class="z z${zc(i)}" style="left:${a}%;width:${b-a}%"></div>`;}
+  return `<div class="zl" role="img" aria-label="현재가와 이동평균선 위치">${z}${lv.map(([n,v])=>`<div class="m" style="left:${pos(v)}%"><span>${n}</span></div>`).join("")}<div class="p" style="left:${pos(c.px)}%"><span>현재</span></div></div>${leg?LEG:""}`;
+}
+const secTxt=c=>`<span class="secchip">${esc(SX[c.sec].n)} · 수익률 ${c.srank}/${c.sn}위 · 시총 ${c.mrank}위</span>`;
+const vtxt=c=>c.vx==null?"—":`${c.vx.toFixed(1)}배<span class="vbar" aria-hidden="true"><i style="width:${Math.min(c.vx/3,1)*100}%"></i></span>`;
+function badges(c){let b="";if(c.tp)b+=chip(c.tp[0]==="꺾임 주의"?"꺾임 주의":"익절 구간","warn");if(c.squeeze)b+=chip("스퀴즈 준비","hot");if(c.kept)b+=chip("유지 중","ok");return b;}
+const warns=c=>(c.warns||[]).map(w=>chip(w,"warn")).join("");
+const sigTxt=c=>`<div class="sm" style="white-space:normal;color:var(--info)" title="${c.sig.filter(x=>x[1]).map(x=>x[0]).join(", ")}">신호 ${c.nsig} · ${c.sig.filter(x=>x[1]&&x[0]!=="스퀴즈 준비").map(x=>x[0]).slice(0,3).join(" · ")}</div>`;
+function stopTxt(c){
+  for(const n of [20,60,100,200]){const v=c["ma"+n];if(v&&c.px>v)return `${n}일선 ${px(v)} 아래 마감`;}
+  return "모든 이평선 아래 · 최근 저점 이탈";}
+const nEx=c=>c.ex20==null?`<span class="na">—</span>`:`<span class="num">${c.ex20}<span class="na">/20</span></span>`;
+
+/* 사이클 (팀 리더 조언 8단계) */
+const B=D.btc||{};
+const BT={up:B.up==null?null:B.up&&B.slopeUp,domDown:B.dom7==null?null:B.dom7<0,alt:B.alt,dd:B.dd};
+const STAGES=[["BTC 상승","BTC 관찰·보유"],["메이저 알트 상승","알트 진입"],["알트 순환매","대장·테마 추적"],["알트 급등","수익실현 준비"],["알트 고점","매도"],["알트 급락","무리한 재진입 X"],["조정 후 BTC","BTC 매수"],["다음 사이클 준비","다음 파동 탐색"]];
+function stageScores(){
+  const y=D.cyc,T=Object.fromEntries((D.tiers||[]).map(t=>[t.n,t.m7])),r=D.disp&&D.disp.norm?D.disp.now/D.disp.norm:null;
+  const bigT=((T["메이저"]||0)+(T["대형"]||0))/2,smT=((T["중형"]||0)+(T["마이너"]||0))/2;
+  const A=BT.alt,has=A!=null;
+  const q=(t,v)=>[t+(v==null?" (데이터 없음)":""),OK(v)];
+  return [
+   [q("BTC 상승 추세",BT.up),q("도미넌스 상승",BT.domDown==null?null:!BT.domDown),q("알트시즌 25 이하",has?A<=25:null),q("메이저가 가장 강함",bigT>smT)],
+   [q("BTC 상승 추세",BT.up),q("도미넌스 하락",BT.domDown),q("메이저·대형이 중소형보다 강함",bigT>smT),q("알트시즌 25~50",has?A>25&&A<=50:null)],
+   [q("중형·마이너가 더 강함",smT>bigT),q("섹터 순환 1.5배 이상",r==null?null:r>=1.5),q("알트시즌 40~75",has?A>=40&&A<75:null),q("7일 오른 코인 50% 이상",y.b7>=50)],
+   [q("알트시즌 75 이상",has?A>=75:null),q("2배↑ 코인 20% 이상",y.hot>=20),q("30일 오른 코인 70% 이상",y.b30>=70)],
+   [q("익절 구간 15% 이상",y.tp>=15),q("7일 오른 코인 1주 새 감소",y.b7<y.b7p-10),q("알트시즌 60 이상",has?A>=60:null)],
+   [q("7일 오른 코인 30% 미만",y.b7<30),q("꺾인 코인 15% 이상",y.brk>=15),q("BTC 하락 추세 또는 도미넌스 상승",BT.up==null?null:(!BT.up||BT.domDown===false))],
+   [q("BTC 고점 대비 −20% 이하",BT.dd==null?null:BT.dd<=-20),q("알트시즌 25 이하",has?A<=25:null),q("7일 오른 코인 30~50%",y.b7>=30&&y.b7<=50)],
+   [q("BTC 50일선 회복",BT.up),q("알트시즌 25 이하",has?A<=25:null),q("섹터 순환 1배 미만",r==null?null:r<1)]];
+}
+function stageNow(){const S=stageScores(),fr=S.map(c=>c.filter(x=>x[1]).length/c.length);const cur=fr.indexOf(Math.max(...fr));
+  return {S,fr,cur,nxt:cur+1<8&&fr[cur+1]>=.5?cur+1:null};}
+
+/* 탭 */
+const TABS=[["home","순위"],["early","초입 후보",()=>TOP.filter(shown).length+EARLY.filter(shown).length],["small","소형 도전",()=>SMALL.filter(shown).length],
+ ["pull","눌림목",()=>PULL.filter(shown).length+NEAR.filter(shown).length+RECL.filter(shown).length],["list","상장",()=>LISTC.filter(shown).length],["sec","섹터"],["mkt","시장"],["bt","성적표"],["chk","데이터 점검"]];
+let cur="home";
+function renderTabs(){document.getElementById("tabs").innerHTML=TABS.map(([k,n,f])=>`<button role="tab" id="t-${k}" aria-controls="p-${k}" aria-selected="${k===cur}" data-tab="${k}">${n}${f?`<span class="c">${f()}</span>`:""}</button>`).join("");}
+function go(k){cur=k;for(const [t] of TABS)document.getElementById("p-"+t).hidden=t!==k;renderTabs();const b=document.querySelector(".bar");if(window.scrollY>b.offsetTop)window.scrollTo({top:b.offsetTop});}
+document.getElementById("tabs").addEventListener("click",e=>{const b=e.target.closest("[data-tab]");if(b)go(b.dataset.tab);});
+function renderFilt(){const all=new Set([...TOP,...EARLY,...SMALL,...PULL,...RECL,...NEAR,...LISTC]);const hid=[...all].filter(c=>!shown(c)).length;
+  document.getElementById("filt").innerHTML=`<span>현물 상장</span>`+EXS.map(([k,n])=>`<label><input type="checkbox" data-ex="${k}" ${EXON[k]?"checked":""}>${n}</label>`).join("")+`<span class="hid">${hid?`필터로 ${hid}개 숨김`:"체크한 곳 중 1곳 이상 상장"}</span>`;}
+document.getElementById("filt").addEventListener("change",e=>{const k=e.target.dataset.ex;if(!k)return;EXON[k]=e.target.checked;try{localStorage.setItem("charon-ex",JSON.stringify(EXON));}catch(err){}renderAll();});
+
+function renderRegime(){
+  const top=D.secs.filter(s=>s.top).sort((a,b)=>a.rank-b.rank).map(s=>s.n);const st=stageNow();
+  document.getElementById("regime").innerHTML=`<b>사이클 ${st.cur+1}단계: ${STAGES[st.cur][0]}</b> · 할 일 ${STAGES[st.cur][1]} · 뜨는 섹터 ${top.slice(0,3).join(", ")||"없음"} · 대장 <b>${D.lead.vol?D.lead.vol.s:"—"}</b><span class="sub">${D.asof} 갱신 · 이평선은 ${D.cday} 마감 봉 + 현재가</span>`;
+}
+
+/* 순위 */
+let rk="c7";
+function renderHome(){
+  const per={c1:"1일",c7:"7일",c30:"30일",c180:"180일",sq:"숏 스퀴즈"};
+  const seg=`<div class="ctl"><span class="seg">${Object.entries(per).map(([k,t])=>`<button data-rk="${k}" aria-pressed="${rk===k}">${t}</button>`).join("")}</span><span class="sm na">${rk==="sq"?"숏이 몰린 코인 · 신호 2개 이상":"가장 많이 오른 코인 15개"}</span></div>`;
+  if(rk==="sq")return renderSq(seg);
+  const rows=live.filter(c=>shown(c)&&c[rk]!=null).sort((a,b)=>b[rk]-a[rk]).slice(0,15);
+  document.getElementById("p-home").innerHTML=seg+(rows.length?`<div class="tbl"><table><thead><tr><th>#</th><th style="text-align:left">코인</th><th>30일 흐름</th><th>${per[rk]}</th><th>24h 거래량</th><th>거래량 변화</th><th>시총</th><th title="거래대금 상위 20개 거래소 중 상장된 곳">상장 거래소</th><th></th></tr></thead><tbody>
+  ${rows.map((c,i)=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td class="na">${i+1}</td><td style="text-align:left"><span class="nm">${esc(c.s)}</span> <span class="secchip">${esc(SX[c.sec].n)}</span><div class="chips">${c.tp?chip(c.tp[0]==="꺾임 주의"?"꺾임 주의":"익절 구간","warn"):""}${c.topRank?chip("추천","hot"):""}${c.uwarn?chip("업비트 유의","warn"):""}</div></td>
+  <td class="sp">${spark(c)}</td><td class="num ${cls(c[rk])}"><b>${f1(c[rk])}</b></td><td class="num">${usd(c.vol)}</td><td class="num">${vtxt(c)}</td><td class="num">${usd(c.mc)}</td><td>${nEx(c)}</td><td>${tvBtn(c)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">${rk==="c180"?"180일 기록이 아직 부족합니다 (일봉 180개 필요)":"해당 코인 없음"}</div>`)+
+  `<h3>대장</h3><div class="chips">${D.lead.vol?chip(`거래대금 대장 ${D.lead.vol.s} ${f1(D.lead.vol.c30,0)}`,"hot"):""}${D.lead.ret?chip(`상승률 대장 ${D.lead.ret.s} ${f1(D.lead.ret.c30,0)}`,"hot"):""}</div>
+  ${D.changes.length?`<h3>추천 변화</h3><div class="chips">${D.changes.map(x=>`<span class="chip ${x.t==="in"?"ok":""}" title="${esc(x.why.join(", "))}">${x.t==="in"?"＋":"－"} ${esc(x.s)} · ${esc(x.why[0])}</span>`).join("")}</div>`:""}`;
+}
+function renderSq(seg){
+  const sc=c=>c.sqn*10+Math.max(-(c.fund||0),0)*.5+Math.max(c.oi||0,0)+Math.max((c.sh||50)-50,0);
+  const rows=live.filter(c=>shown(c)&&c.fund!=null&&c.sqn>=2).sort((a,b)=>sc(b)-sc(a)).slice(0,15);
+  document.getElementById("p-home").innerHTML=seg+`<div class="tbl"><table><thead><tr><th>#</th><th style="text-align:left">코인</th><th>신호</th><th>펀딩 (연)</th><th>OI 24h</th><th>숏 계정</th><th>7일</th><th></th></tr></thead><tbody>
+  ${rows.map((c,i)=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td class="na">${i+1}</td><td style="text-align:left"><span class="nm">${esc(c.s)}</span> <span class="secchip">${esc(SX[c.sec].n)}</span></td>
+  <td>${bar(c.sqn/4*100,c.sqn>=3?"var(--accent)":"var(--faint)")}<span class="sm">${c.sqn}/4</span></td><td class="num ${c.fund<=0?"up":""}">${c.fund}%</td><td class="num ${(c.oi||0)>=5?"up":""}">${f1(c.oi)}</td><td class="num">${c.sh==null?"—":c.sh.toFixed(0)+"%"}</td><td class="num ${cls(c.c7)}">${f1(c.c7)}</td><td>${tvBtn(c)}</td></tr>`).join("")||'<tr><td colspan="8" class="na">해당 코인 없음</td></tr>'}</tbody></table></div>
+  <details class="rule"><summary>기준 보기</summary><ul><li>숏 우세: 펀딩 0 이하 · 숏 쌓임: OI 24시간 +${TH.sq_oi}% 이상 · 숏 계정 ${TH.sq_short}% 이상 (Bitget) · 가격 버팀: 7일 0% 이상</li><li>3개 이상이면 "스퀴즈 준비". 숏이 몰렸는데 가격이 안 빠지면 숏 청산이 가격을 밀어 올릴 수 있음</li></ul></details>`;
+}
+document.getElementById("p-home").addEventListener("click",e=>{const b=e.target.closest("[data-rk]");if(b){rk=b.dataset.rk;renderHome();}});
+
+/* 초입 후보 */
+function miniCard(c){
+  const s=SX[c.sec];
+  return `<button class="pick" data-coin="${c.id}"><div class="t"><span class="rk">${c.topRank}위</span><span class="sym">${esc(c.s)}</span>${spark(c)}</div>
+  <div class="rt num"><span>7일 <b class="${cls(c.c7)}">${f1(c.c7)}</b></span><span>30일 <b class="${cls(c.c30)}">${f1(c.c30)}</b></span></div>
+  <p class="why">${esc(s.n)} 섹터보다 30일 ${(c.c30-s.m30).toFixed(0)}%p 덜 오름</p>
+  <div class="chips">${(c.warns||[]).slice(0,2).map(w=>chip(w,"warn")).join("")}${c.kept?chip("유지 중","ok"):""}</div>
+  <div class="stop">무효: ${esc(stopTxt(c))}</div></button>`;
+}
+function condRows(c){
+  const s=SX[c.sec];
+  const g=[["섹터",[[`상위 섹터 (${s.rank}위)`,s.top]]],
+   ["덜 오름",[[`30일 z ${c.z30.toFixed(2)} (기준 ${TH.z30} 이하)`,c.z30<=TH.z30],[`7일 z ${c.z7.toFixed(2)} (기준 ${TH.z7} 이하)`,c.z7<=TH.z7],[`30일 ${f1(c.c30)} (+${TH.cap30}% 이하)`,c.c30<=TH.cap30],[`7일 ${f1(c.c7)} (+${TH.cap7}% 이하)`,c.c7<=TH.cap7]]],
+   ["움직임 (참고)",[[`20일선 위`,c.a20],[`거래량 ${c.vx==null?"—":c.vx.toFixed(1)+"배"}`,c.cvol],[`3일 섹터보다 강함`,c.cfirst]]],
+   ["안전",[[`시총 ${usd(c.mc)}`,c.mc>=TH.pick_mcap],[`거래량 ${usd(c.vol)}`,c.vol>=TH.pick_volume],[`상장 ${(c.L||"").length}곳`,(c.L||"").length>=2],[`펀딩 ${c.fund==null?"—":c.fund+"%"}`,c.fund==null||c.fund<TH.funding_hot],[`업비트 유의 아님`,!c.uwarn]]]];
+  return g.map(([h,rows])=>`<h4>${h}</h4><div class="chips">${rows.map(([t,ok])=>chip((ok?"✓ ":"✕ ")+t,ok?"ok":"")).join("")}</div>`).join("");
+}
+const sortSt={early:"score",small:"score"};
+function coinTable(rows,key){
+  const sk=sortSt[key];
+  rows=[...rows].sort((a,b)=>sk==="score"?b.score-a.score:sk==="vx"?(b.vx||0)-(a.vx||0):sk==="c7"?a.c7-b.c7:a.c30-b.c30);
+  const th=(k,t)=>`<th><button data-sort="${k}" data-list="${key}" ${sk===k?'aria-sort="descending"':""}>${t}${sk===k?" ▾":""}</button></th>`;
+  return `<div class="tbl"><table><thead><tr><th>코인</th><th>30일 흐름</th><th>상장</th>${th("c7","7일")}${th("c30","30일")}${th("vx","거래량")}${th("score","점수")}<th></th></tr></thead><tbody>
+  ${rows.map(c=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td><span class="nm">${esc(c.s)}</span> ${secTxt(c)}${sigTxt(c)}<div class="chips">${badges(c)}${warns(c)}</div></td>
+  <td class="sp">${spark(c)}</td><td>${nEx(c)}</td><td class="num ${cls(c.c7)}">${f1(c.c7)}</td><td class="num ${cls(c.c30)}">${f1(c.c30)}</td><td class="num">${vtxt(c)}</td><td class="num"><b>${c.score.toFixed(0)}</b></td><td>${tvBtn(c)}</td></tr>`).join("")||'<tr><td colspan="8" class="na">해당 코인 없음</td></tr>'}</tbody></table></div>`;
+}
+let sqOnly=false;
+function renderEarly(){let r=EARLY.filter(shown);if(sqOnly)r=r.filter(c=>c.squeeze);const t=TOP.filter(shown);
+  document.getElementById("p-early").innerHTML=`<h3 style="margin-top:0">Top 3 <span class="sm na">모든 조건 통과 · 시총 순</span></h3>
+  ${t.length?`<div class="picks">${t.map(miniCard).join("")}</div>`:'<div class="empty">조건을 모두 통과한 코인이 없습니다. 억지로 찾지 않는 것이 정상입니다.</div>'}
+  <h3>후보 <span class="sm na">상위 섹터 · 신호 2개 이상 · 시총 $300M+</span></h3>
+  <details class="rule"><summary>기준 보기</summary><ul><li>Top 3: 상위 섹터 + 섹터 안 30일 z ${TH.z30} 이하 + 7일 z ${TH.z7} 이하 + 7일 +${TH.cap7}%·30일 +${TH.cap30}% 이하 + 안전 조건. 한 번 들어오면 z ${TH.z30_keep}까지 유지</li><li>후보 신호: 덜 오름 · 20일선 위 · 거래량 증가 · 추세 돌파 · 스퀴즈 준비 · 업비트 관심</li><li>항상 제외: 거래량 $1M 미만, 상장 거래소 없음 (지금 ${D.excluded}개)</li></ul></details>
+  <label class="tog"><input type="checkbox" id="sqonly" ${sqOnly?"checked":""}>스퀴즈 준비만</label>${coinTable(r,"early")}`;}
+function renderSmall(){
+  const s=(D.bt&&D.bt.lists&&D.bt.lists.small)||null;
+  document.getElementById("p-small").innerHTML=`<div class="alert">시총 $70M~300M · 신호 2개 이상 · 섹터 상위 여부 무관${s?` · 과거 1년 7일 승률 ${s.win7.toFixed(0)}%`:""} · 작은 비중 전제</div>${coinTable(SMALL.filter(shown),"small")}`;}
+["p-early","p-small"].forEach(id=>{const el=document.getElementById(id);
+  el.addEventListener("click",e=>{const b=e.target.closest("[data-sort]");if(b){sortSt[b.dataset.list]=b.dataset.sort;b.dataset.list==="early"?renderEarly():renderSmall();}});
+  el.addEventListener("change",e=>{if(e.target.id==="sqonly"){sqOnly=e.target.checked;renderEarly();}});});
+
+/* 눌림목 */
+const ST={hold:["hold","지지 중"],lost:["lost","이탈"],wait:["bounce","조정 진행"],turn:["turn","전환 후보"],bounce:["bounce","반등"]};
+function renderPull(){
+  const p=PULL.filter(shown),n=NEAR.filter(shown),r=RECL.filter(shown);
+  const card=(c,head,q)=>`<button class="pc" data-coin="${c.id}"><div class="t"><b>${esc(c.s)}</b>${head}${spark(c)}</div>${secTxt(c)} <span class="sm num">· 30일 <span class="${cls(c.c30)}">${f1(c.c30)}</span> · 30일 고점 대비 <span class="dn">${f1(c.hi30)}</span></span>${ladder(c,false)}<div class="chips">${q}${badges(c)} ${tvBtn(c)}</div></button>`;
+  document.getElementById("p-pull").innerHTML=`<p class="lead">강하게 오른 섹터의 선두권 코인이 20일선 아래로 쉬는 중일 때, 60·100·200일선에서 받쳐지는지 봅니다. <b>실험 목록</b>: 2.0 백테스트에서 "더 오른 코인" 전략은 성적이 가장 나빴습니다.</p>
+  ${LEG}<details class="rule"><summary>판정 기준</summary><ul><li>대상: 섹터 30일이 시장보다 +${TH.pull_sec30}%p 이상 · 코인 30일 +${TH.pull_c30}% 이상 · 섹터 안 수익률 상위 절반 · 20일선 아래 · 30일 고점 대비 ${TH.pull_hi_max}~${TH.pull_hi_min}%</li>
+  <li>지지 중: 가장 가까운 아래 이평선(60·100·200) 위 0~${TH.ma_near}% · 이탈: 그 선 아래</li><li>품질: 이평 정배열, 조정 중 거래량 감소, 펀딩 식음</li></ul></details>
+  <div class="pl">${p.map(c=>card(c,`<span class="state ${ST[c.pull.st][0]}">${ST[c.pull.st][1]}</span><span class="sm">${esc(c.pull.txt)}</span>`,c.pull.q.map(([t,ok])=>chip((ok?"✓ ":"✕ ")+t,ok?"ok":"")).join(""))).join("")||`<div class="empty">지금은 조건을 모두 채운 코인이 없습니다.</div>`}</div>
+  ${n.length?`<h3>조건 1~2개 빠진 코인 (관찰)</h3><div class="pl">${n.map(c=>card(c,`<span class="state ${c.pullmiss.length===1?"bounce":"lost"}">${c.pullmiss.length}개 미달</span><span class="sm">빠진 조건: ${esc(c.pullmiss.join(", "))}</span>`,"")).join("")}</div>`:""}
+  <h3>20일선 재돌파</h3><p class="lead">20일선 아래에 ${TH.reclaim_days}일 이상 있다가 올라온 코인. 60일선 아래면 반등, 위면 전환 후보.</p>
+  <div class="pl">${r.map(c=>card(c,`<span class="state ${ST[c.reclaim.st][0]}">${ST[c.reclaim.st][1]}</span><span class="sm">20일선 아래 ${c.rc}일 → 재돌파</span>`,c.reclaim.q.map(([t,ok])=>chip((ok?"✓ ":"✕ ")+t,ok?"ok":"")).join(""))).join("")||'<div class="empty">재돌파 코인이 없습니다.</div>'}</div>`;
+}
+
+/* 상장 */
+function renderList(){
+  const L=LISTC.filter(shown);
+  document.getElementById("p-list").innerHTML=`<h3 style="margin-top:0">최근 상장 공지</h3>
+  ${D.news.length?`<div class="tbl"><table><tbody>${D.news.map(n=>`<tr><td style="text-align:left" class="na">${esc(n.d)}</td><td style="text-align:left">${esc(n.ex)}</td><td style="text-align:left;white-space:normal"><a href="${esc(n.u)}" target="_blank" rel="noopener">${esc(n.t)}</a></td></tr>`).join("")}</tbody></table></div>`:'<div class="empty">공지를 받지 못했습니다 (데이터 점검 탭 참고).</div>'}
+  <h3>상장 후보 <span class="sm na">업비트 원화·바이낸스 미상장 · 거래량 $5M+</span></h3>
+  <div class="tbl"><table><thead><tr><th>코인</th><th>30일 흐름</th><th style="text-align:left">근거</th><th>상장</th><th>7일</th><th>24h 거래량</th><th></th></tr></thead><tbody>
+  ${L.map(c=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td><span class="nm">${esc(c.s)}</span> <span class="secchip">${esc(SX[c.sec].n)}</span></td><td class="sp">${spark(c)}</td><td style="text-align:left">${c.listwhy.map(w=>chip(w,"ok")).join("")}</td><td>${nEx(c)}</td><td class="num ${cls(c.c7)}">${f1(c.c7)}</td><td class="num">${usd(c.vol)}</td><td>${tvBtn(c)}</td></tr>`).join("")||'<tr><td colspan="7" class="na">해당 코인 없음</td></tr>'}</tbody></table></div>`;
+}
+
+/* 섹터 */
+let secSort="score",secDir=-1,coinOrd="lag";const OPEN=new Set();
+document.getElementById("p-sec").addEventListener("toggle",e=>{const d=e.target;if(d.dataset&&d.dataset.k){d.open?OPEN.add(d.dataset.k):OPEN.delete(d.dataset.k);}},true);
+function renderSec(){
+  const key={score:s=>s.score,x7:s=>s.x7,x30:s=>s.x30,mc:s=>s.mc}[secSort];
+  const rows=[...D.secs].sort((a,b)=>(key(a)-key(b))*secDir);
+  const mx=Math.max(...D.secs.map(s=>Math.abs(s.score)),1);
+  const seg=(cur,items,attr)=>`<span class="seg">${items.map(([k,t])=>`<button data-${attr}="${k}" aria-pressed="${cur===k}">${t}</button>`).join("")}</span>`;
+  document.getElementById("p-sec").innerHTML=`<p class="sm na" style="margin:0 0 8px"><span class="tagtop">■ 보라</span> = 추천을 뽑는 상위 ${TH.top_sec}개 (7일·30일 시장 대비 + 오른 코인 비율 점수, 코인 ${TH.sec_min}개 이상) · 섹터를 누르면 코인 목록</p>
+  <div class="ctl">정렬 ${seg(secSort,[["score","종합"],["x7","7일"],["x30","30일"],["mc","시총"]],"ss")}
+  <span class="seg"><button data-sd="-1" aria-pressed="${secDir===-1}">높은 순</button><button data-sd="1" aria-pressed="${secDir===1}">낮은 순</button></span>
+  코인 순서 ${seg(coinOrd,[["lag","덜 오른 순"],["now","지금 오르는 순"],["mc","시총 순"]],"co")}</div>
+  ${rows.map(s=>{const cs=s.ids.map(i=>CM[i]).filter(Boolean);const nat=new Set(s.native||[]);
+    const o={lag:(a,b)=>a.c30-b.c30,now:(a,b)=>(b.c3??-999)-(a.c3??-999),mc:(a,b)=>b.mc-a.mc}[coinOrd];
+    return `<details class="sd" data-k="${s.k}" ${OPEN.has(s.k)?"open":""}><summary><div class="sec ${s.top?"top":""}"><span class="n">${s.rank}</span><div><div class="h"><span class="nm">${esc(s.n)}</span>${s.top?'<span class="tagtop">상위 섹터</span>':""}${s.watch?chip("관찰 섹터"):""}${s.thin&&!s.watch?chip("코인 수 부족"):""}<span class="sm num">7일 <span class="${cls(s.x7)}">${f1(s.x7)}p</span> · 30일 <span class="${cls(s.x30)}">${f1(s.x30,0)}p</span> · 상승 ${s.br.toFixed(0)}% · ${cs.length}개</span></div>
+    <div class="sbar"><i style="width:${Math.max(s.score,0)/mx*100}%"></i></div>
+    <div class="chips">${chip((s.x7>0?"✓ ":"✕ ")+`시장보다 7일 ${f1(s.x7)}p`,s.x7>0?"ok":"")}${chip((s.x30>0?"✓ ":"✕ ")+`30일 ${f1(s.x30,0)}p`,s.x30>0?"ok":"")}${chip((s.br>=TH.breadth_min?"✓ ":"✕ ")+`상승 비율 ${s.br.toFixed(0)}%`,s.br>=TH.breadth_min?"ok":"")}${s.lead?chip(`대장 ${s.lead.s} ${f1(s.lead.c30,0)}`,"hot"):""}${nat.size?chip(`혼합 섹터: 네이티브 ${nat.size}개 + 참여 프로젝트`,"warn"):""}</div></div></div></summary>
+    <div class="slist">${[...cs].sort(o).map(c=>`<div class="r" data-coin="${c.id}"><b>${esc(c.s)}${s.lead&&s.lead.id===c.id?' <span class="chip hot">대장</span>':""}${nat.has(c.id)?' <span class="chip">네이티브</span>':""}</b>${spark(c,64,18)}<span class="g num"><span class="${cls(c.c3)}">3일 ${f1(c.c3)}</span><span class="${cls(c.c30)}">30일 ${f1(c.c30)}</span>${tvBtn(c)}</span></div>`).join("")}</div></details>`;}).join("")}`;
+}
+document.getElementById("p-sec").addEventListener("click",e=>{const b=e.target.closest("button[data-ss],button[data-sd],button[data-co]");if(!b)return;
+  if(b.dataset.ss)secSort=b.dataset.ss;if(b.dataset.sd)secDir=+b.dataset.sd;if(b.dataset.co)coinOrd=b.dataset.co;renderSec();});
+
+/* 시장 */
+const bar=(v,col="var(--info)")=>`<span class="hb"><i style="width:${Math.max(0,Math.min(100,v))}%;background:${col}"></i></span>`;
+function renderMkt(){
+  const y=D.cyc,r=D.disp&&D.disp.norm?D.disp.now/D.disp.norm:null,T=D.tiers||[];
+  const {S,fr,cur,nxt}=stageNow();
+  const base=B.c7!=null?B.c7:D.mk.m7,baseN=B.c7!=null?"BTC 대비":"시장 전체 대비";
+  const rel=T.map(t=>({...t,rel:t.m7-base}));const mx=Math.max(...rel.map(t=>Math.abs(t.rel)),1);
+  const best=[...rel].sort((a,b)=>b.rel-a.rel)[0];
+  const hist=[["7일간 오른 코인",y.b7,"var(--up)"],["30일간 오른 코인",y.b30,"var(--up)"],["90일 저점 대비 +50%↑",y.big,"var(--info)"],["90일 저점 대비 2배↑",y.hot,"var(--amber)"],["익절 구간",y.tp,"var(--amber)"],["급등 후 꺾임",y.brk,"var(--down)"]];
+  const tiles=[["BTC 추세",BT.up==null?"—":BT.up?"상승 추세":"하락 추세",B.ma50?`50일선 ${B.px>B.ma50?"위":"아래"}`:"일봉 쌓는 중",BT.up],
+    ["BTC 도미넌스",B.dom7==null?"—":`${B.dom7<0?"▼":"▲"} ${Math.abs(B.dom7).toFixed(1)}%p`,B.dom==null?"—":`${B.dom.toFixed(1)}% · 7일`,BT.domDown],
+    ["알트/BTC (TOTAL3÷BTC)",B.alt30==null?"—":`${B.alt30>=0?"▲":"▼"} ${Math.abs(B.alt30).toFixed(1)}%`,B.altd?`${B.altd}일`:"기록 쌓는 중",B.alt30==null?null:B.alt30>0]];
+  const alt=tiles.filter(t=>t[3]===true).length,known=tiles.filter(t=>t[3]!=null).length;
+  document.getElementById("p-mkt").innerHTML=`
+  <div class="box"><div class="bh"><h3>알트 사이클</h3><span class="state turn">${cur+1}. ${STAGES[cur][0]}${nxt!=null?` → ${nxt+1}. ${STAGES[nxt][0]} 전환 중`:""}</span></div>
+   <div class="steps">${STAGES.map(([n,a],i)=>`<div class="st ${i===cur?"on":i===nxt?"nx":""}"><span class="dot">${i+1}</span><span class="sn">${n}</span><span class="sa">${a}</span><i style="width:${fr[i]*100}%"></i></div>`).join("")}</div>
+   <div class="bh" style="margin:10px 0 4px"><b>지금 할 일: ${STAGES[cur][1]}</b></div>
+   <div class="chips">${S[cur].map(([t,ok])=>chip((ok?"✓ ":"✕ ")+t,ok?"ok":"")).join("")}</div>
+   ${nxt!=null?`<div class="chips" style="margin-top:4px"><span class="sm na">다음 단계 조건:</span>${S[nxt].map(([t,ok])=>chip((ok?"✓ ":"✕ ")+t,ok?"ok":"")).join("")}</div>`:""}
+   <div style="margin-top:14px"><span class="sm na">알트시즌 지수 (상위 50개 알트 중 ${esc(B.altbase||"")} BTC보다 더 오른 비율)</span>${B.alt==null?'<p class="sm na">계산 불가</p>':`<div class="gauge cg"><i style="left:${B.alt}%"></i><span style="left:${B.alt}%">${B.alt}</span></div>`}<div class="gl"><span>BTC 시즌</span><span>중립</span><span>알트시즌</span></div></div>
+   <details class="rule"><summary>단계 판정 방식</summary><ul><li>팀 리더가 말한 8단계 흐름을 단계마다 3~4개 조건으로 바꿨습니다. 막대 = 그 단계 조건을 채운 비율</li><li>가장 많이 채운 단계가 현재 단계, 다음 단계를 절반 이상 채우면 "전환 중"</li><li>기준값은 검증 전입니다</li></ul></details></div>
+  <div class="grid2" style="margin-top:14px">
+  <div class="box"><div class="bh"><h3>체급별 7일 수익률</h3><span class="sm na">${baseN}</span></div>
+   ${rel.map(t=>{const w=Math.abs(t.rel)/mx*50;return `<div class="tier"><span>${t.n}<br><span class="na sm">${t.rg}</span></span><div class="b"><i style="${t.rel>=0?`left:50%;width:${w}%;background:var(--up)`:`right:50%;width:${w}%;background:var(--down)`}"></i></div><span class="num ${cls(t.rel)}">${f1(t.rel)}</span></div>`}).join("")}
+   ${best?`<p class="sm" style="margin:8px 0 0">가장 강한 체급: <b>${best.n}</b>${best.lead?` · 대장 ${esc(best.lead.s)}`:""}. 메이저 → 대형 → 중형 → 마이너 순으로 번지면 알트 상승장이 넓어지는 신호.</p>`:""}</div>
+  <div class="box"><div class="bh"><h3>BTC와 알트</h3><span class="state ${alt>=2?"hold":"lost"}">알트 유리 ${alt}/${known||3}</span></div>
+   <div class="tiles">${tiles.map(([n,b,a,ok])=>`<div class="tile ${ok===true?"ok":ok===false?"no":""}"><span class="sm na">${n}</span><b>${b}</b><span class="sm">${a}</span></div>`).join("")}</div>
+   <details class="rule"><summary>뜻 보기</summary><ul><li>BTC 추세: 일봉 50일선 위 + 50일선이 오르는 중이면 상승 추세</li><li>도미넌스 ▼: 돈이 BTC에서 알트로</li><li>알트/BTC ▲: BTC·ETH를 뺀 알트 시총이 BTC보다 빨리 커지는 중</li><li>도미넌스·알트/BTC는 3.0부터 기록을 쌓아 7일·30일 뒤부터 표시</li></ul></details>
+   <div class="chips">${[["CRYPTOCAP:BTC.D","BTC.D"],["CRYPTOCAP:TOTAL3","TOTAL3"],["CRYPTOCAP:TOTAL3/CRYPTOCAP:BTC","TOTAL3÷BTC"],["CRYPTOCAP:OTHERS.D","OTHERS.D"]].map(([s,t])=>`<a class="tvb" href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(s)}" target="_blank" rel="noopener">${t}</a>`).join("")}</div></div></div>
+  <div class="grid2" style="margin-top:14px">
+  <div class="box"><div class="bh"><h3>시장 폭</h3><span class="sm na">추적 ${y.n}개</span></div>
+   <div class="hg">${hist.map(([n,v,c])=>`<span class="hl">${n}</span>${bar(v,c)}<span class="hv num">${v.toFixed(0)}%</span>`).join("")}</div>
+   <p class="sm na" style="margin:6px 0 0">7일간 오른 코인: 1주 전 ${y.b7p.toFixed(0)}% → 지금 ${y.b7.toFixed(0)}%</p></div>
+  <div class="box"><div class="bh"><h3>섹터 순환</h3>${r==null?"":`<span class="state ${r>=2?"turn":"bounce"}">${r>=2?"순환장":"같이 움직임"}</span>`}</div>
+   ${r==null?'<p class="sm na">계산 불가</p>':`<div class="rot"><span class="hb" style="position:relative"><i style="width:${Math.min(r/3,1)*100}%;background:var(--accent)"></i><b style="left:66.6%"></b></span><span class="num">${r.toFixed(1)}배</span></div>
+   <div class="gl"><span>0</span><span>1배</span><span>2배 순환장</span><span>3배</span></div>`}
+   <details class="rule"><summary>뜻 보기</summary><ul><li>섹터끼리 7일 수익률 차이가 최근 30일 평소의 몇 배인지</li><li>2배↑: 돈이 특정 섹터로 몰림 → 강한 섹터 고르기가 중요</li><li>평소 수준: 시장 전체가 같이 움직임 → BTC 방향이 중요</li></ul></details></div></div>`;
+}
+
+/* 성적표 */
+const V={keep:["유지","v-ok"],watch:["지켜보기","v-hold"],drop:["빼기","v-no"],base:["기준","v-hold"],wait:["측정 중","v-hold"]};
+function btRow(n,x,vd,why){
+  const has=x&&x.n7;
+  return `<div class="bt"><div class="btn"><b>${esc(n)}</b><span class="verdict ${V[vd][1]}">${V[vd][0]}</span></div>
+   ${has?`<div class="flip"><i style="width:${x.win7}%"></i><b></b></div><span class="num">${x.win7.toFixed(0)}%</span><span class="num ${cls(x.med7)}">${f1(x.med7)}p</span><span class="num na">${x.n7}</span>`:`<div class="flip"></div><span class="na">—</span><span></span><span></span>`}<span class="sm">${why||""}</span></div>`;
+}
+function verdict(x){if(!x||!x.n7||x.n7<30)return "wait";if(x.win7>50&&x.med7>0&&x.avg7>0)return "keep";if(x.win7<45&&x.med7<0)return "drop";return "watch";}
+function renderBt(){
+  const b=D.bt,live3=D.board;
+  const BL=b&&b.v&&b.v.startsWith("3")?b:null;
+  const names={top:"Top 3",early:"초입 후보",small:"소형 도전",pull:"눌림목 (지지 중)",reclaim_turn:"20일선 재돌파: 전환",reclaim_bounce:"20일선 재돌파: 반등",lead:"반대 전략: 섹터 1등 코인",tp:"익절 경보가 뜬 코인"};
+  const exps={z10:"덜 오름 z −1.0",score:"Top 3 점수 순",rs:"상대강도선 20일선 위",nocap:"상한 없음 (7일·30일)"};
+  document.getElementById("p-bt").innerHTML=`<p class="sm na" style="margin:0 0 8px">막대 = 7일 뒤 같은 섹터 중간값보다 더 오른 비율 (가운데 선 50%) · 중간값 · 표본. 판정: 표본 30개 이상에서 승률·중간값·평균이 모두 좋으면 유지</p>
+  <h3 style="margin-top:0">과거 1년 백테스트 ${BL?`<span class="sm na">${BL.start} ~ ${BL.end} · 코인 ${BL.coins}개</span>`:""}</h3>
+  ${BL?Object.entries(names).filter(([k])=>BL.lists[k]).map(([k,n])=>btRow(n,BL.lists[k],k==="lead"?"base":k==="tp"?(BL.lists.tp.med7<0?"keep":"watch"):verdict(BL.lists[k]),k==="lead"?"비교 기준":k==="tp"?"중간값이 마이너스면 경보가 맞은 것":"")).join(""):'<div class="empty">3.0 백테스트가 아직 없습니다. Actions → backfill → Run workflow를 실행하세요.</div>'}
+  ${BL&&BL.exp?`<details class="rule"><summary>실험 (Top 3 변형)</summary>${Object.entries(exps).filter(([k])=>BL.exp[k]).map(([k,n])=>btRow(n,BL.exp[k],verdict(BL.exp[k]),"")).join("")}
+   ${BL.alt?`<h4>알트시즌 구간별 Top 3</h4>${Object.entries(BL.alt).map(([k,x])=>btRow("알트시즌 "+k,x,verdict(x),"")).join("")}`:""}
+   ${BL.halves?`<h4>기간 나눠 보기 (Top 3)</h4>${Object.entries(BL.halves).map(([k,x])=>btRow(k,x,x&&x.win7>50?"keep":"watch","")).join("")}`:""}</details>`:""}
+  <h3>실전 기록 (v${D.v}부터)</h3>
+  ${live3.lists.map(x=>btRow(x.n,x.n7?{n7:x.n7,win7:x.win7,med7:x.med7,avg7:x.avg7}:null,x.n7>=30?verdict(x):"wait",`기록 ${x.total}개 · 7일 채점 ${x.n7}개`)).join("")}
+  ${live3.old?`<p class="sm na">이전 버전 기록 ${live3.old}개는 따로 보관</p>`:""}
+  <details class="rule"><summary>2.0에서 얻은 결론</summary><ul><li>덜 오름만 걸었을 때 가장 좋았음 (55%) → 3.0 핵심</li><li>평균가 위·거래량 급증을 더하면 나빠짐 → 필수에서 제외</li><li>상승 초입 실험 42%, 중간값 −1.3%p (이미 오른 코인을 7일 상승순으로 골랐음) → 신호 교체</li><li>섹터보다 더 오른 코인을 사는 전략이 가장 나빴음 (40%) → 눌림목은 실험 목록</li><li>트론 섹터 제외 후보, 솔라나·AI·디파이 지켜보기</li></ul></details>`;
+}
+
+/* 데이터 점검 */
+function renderChk(){
+  const SRC=[["CoinGecko","https://www.coingecko.com","가격·시총·거래량(2시간), 섹터 구성(하루), 도미넌스, 거래소 순위"],["Bitget","https://www.bitget.com","현물 일봉(이평선), 선물 OI·펀딩·롱숏 비율"],["OKX","https://www.okx.com","현물 일봉(대체), 선물 OI·펀딩"],["Hyperliquid","https://app.hyperliquid.xyz","선물 OI·펀딩"],["업비트","https://upbit.com","원화 거래대금, 마켓·투자유의, 상장 공지"],["빗썸","https://www.bithumb.com","원화 상장 목록"],["Binance","https://www.binance.com","상장 목록(CoinGecko 경유), 상장 공지"],["CoinMarketCap","https://coinmarketcap.com","가격 교차 확인(하루)"]];
+  const st=D.src||{};
+  const sttxt=Object.entries(st).map(([k,[s,m]])=>chip(`${s==="ok"?"✓":s==="skip"?"–":"✕"} ${k}${m?" · "+m:""}`,s==="ok"?"ok":s==="skip"?"":"warn")).join("");
+  const chk=[...live].filter(c=>c.tv&&c.ma20).sort((a,b)=>b.mc-a.mc).slice(0,14);
+  document.getElementById("p-chk").innerHTML=`<h3 style="margin-top:0">이번 실행 (${D.asof}) <span class="sm na">CoinGecko 호출 ${D.calls}회</span></h3><div class="chips">${sttxt||'<span class="sm na">새로 받은 항목 없음 (캐시 사용)</span>'}</div>
+  ${D.errors.length?`<details class="rule" open><summary>받지 못한 데이터 ${D.errors.length}건</summary><ul>${D.errors.map(e=>`<li>${esc(e)}</li>`).join("")}</ul></details>`:""}
+  ${D.cmc?`<p class="sm">CMC 교차 확인: ${D.cmc.ok}개 일치 · ${D.cmc.bad}개 3% 넘게 차이${D.cmc.worst.length?` (${esc(D.cmc.worst.join(", "))})`:""}</p>`:""}
+  <h3>데이터 출처</h3><div class="tbl"><table><tbody>${SRC.map(([n,u,w])=>`<tr><td style="text-align:left"><a href="${u}" target="_blank" rel="noopener">${n}</a></td><td style="text-align:left;white-space:normal" class="sm">${w}</td></tr>`).join("")}</tbody></table></div>
+  ${D.top20.length?`<p class="sm na">상장 수 기준 거래소 (거래대금 상위 20): ${esc(D.top20.join(", "))}</p>`:""}
+  <h3>트레이딩뷰 대조</h3><p class="sm na">차트 버튼 → 일봉 → 이동평균(단순) 20·60·100·200. 이 사이트는 ${D.cday}까지 마감된 봉 + 현재가로 계산하므로 트레이딩뷰 현재 봉 값과 같아야 합니다 (갱신 시각 차이만큼 오차).</p>
+  <div class="tbl"><table><thead><tr><th style="text-align:left">코인</th><th style="text-align:left">일봉 출처</th><th>현재가</th><th>20</th><th>60</th><th>100</th><th>200</th><th></th></tr></thead><tbody>
+  ${chk.map(c=>`<tr><td style="text-align:left"><b>${esc(c.s)}</b></td><td style="text-align:left" class="sm">${esc(c.tv||c.src)}</td><td class="num">${px(c.px)}</td><td class="num">${px(c.ma20)}</td><td class="num">${px(c.ma60)}</td><td class="num">${px(c.ma100)}</td><td class="num">${px(c.ma200)}</td><td>${tvBtn(c)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+/* 상세 */
+const dlg=document.getElementById("dlg");
+function openCoin(id){
+  const c=CM[id];if(!c)return;const s=SX[c.sec];
+  const where=c.topRank?`Top ${c.topRank}`:EARLY.includes(c)?"초입 후보":SMALL.includes(c)?"소형 도전":c.pull?"눌림목":c.reclaim?"20일선 재돌파":"목록 밖";
+  document.getElementById("dlb").innerHTML=`<div class="top"><b>${esc(c.s)}</b><span class="na">${esc(c.name)}</span><span class="chip hot">${where}</span><button class="x" id="dlx">닫기</button></div>
+  ${secTxt(c)}${c.secs.length>1?`<p class="sm na">다른 소속 섹터: ${c.secs.filter(k=>k!==c.sec&&SX[k]).map(k=>SX[k].n).join(", ")}</p>`:""}
+  <div style="margin:8px 0">${spark(c,300,60)}</div>
+  <div class="kv num"><span>현재가 · 시총</span><span>$${px(c.px)} · ${usd(c.mc)}</span></div>
+  <div class="kv num"><span>1일 / 7일 / 30일 / 180일</span><span><span class="${cls(c.c1)}">${f1(c.c1)}</span> / <span class="${cls(c.c7)}">${f1(c.c7)}</span> / <span class="${cls(c.c30)}">${f1(c.c30)}</span> / <span class="${cls(c.c180)}">${f1(c.c180)}</span></span></div>
+  <div class="kv num"><span>섹터 중간값 7일 / 30일</span><span>${f1(s.m7)} / ${f1(s.m30)}</span></div>
+  <div class="kv num"><span>이평선 20 / 60 / 100 / 200</span><span>${px(c.ma20)} / ${px(c.ma60)} / ${px(c.ma100)} / ${px(c.ma200)}</span></div>
+  <div class="kv num"><span>거래량</span><span>${usd(c.vol)} · 최근 3일 ${c.vx==null?"—":c.vx.toFixed(1)+"배"}</span></div>
+  <div class="kv num"><span>상장 (상위 20개 거래소)</span><span>${c.ex20==null?"—":c.ex20+"곳"}</span></div>
+  <div class="kv num"><span>구매 고려 점수</span><span><b>${c.score.toFixed(0)}</b></span></div>
+  ${c.tp?`<div class="alert" style="margin-top:10px"><b>${esc(c.tp[0])}</b> · ${esc(c.tp[1])}</div>`:""}
+  <h4>이평선 위치</h4>${ladder(c)}${condRows(c)}
+  <h4>숏 스퀴즈 (${c.sqn}/4)</h4><div class="chips">${c.sq.map(([t,ok,v])=>chip(`${ok?"✓":"✕"} ${t} · ${v}`,ok?"ok":"")).join("")}</div>
+  ${c.warns.length?`<h4>경고</h4><div class="chips">${warns(c)}</div>`:""}
+  <h4>상장 거래소</h4><div class="chips">${EXS.map(([k,n])=>`<span class="ex ${(c.L||"").includes(k)?"":"off"}">${n}</span>`).join(" ")}</div>
+  <p class="sm na" style="margin-top:10px">무효 기준: ${esc(stopTxt(c))} · 일봉 출처 ${esc(c.tv||c.src||"—")}</p>
+  <div class="links"><a class="pri" href="${tv(c)}" target="_blank" rel="noopener">트레이딩뷰 차트</a><a href="https://www.coingecko.com/en/coins/${c.id}" target="_blank" rel="noopener">CoinGecko</a></div>`;
+  dlg.showModal();document.getElementById("dlx").onclick=()=>dlg.close();
+}
+dlg.addEventListener("click",e=>{if(e.target===dlg)dlg.close();});
+document.addEventListener("click",e=>{if(e.target.closest("a"))return;const b=e.target.closest("[data-coin]");if(b&&!e.target.closest("dialog"))openCoin(b.dataset.coin);});
+document.addEventListener("keydown",e=>{if(e.key==="Enter"){const r=e.target.closest&&e.target.closest("tr[data-coin]");if(r)openCoin(r.dataset.coin);}});
+
+/* 검색 */
+const q=document.getElementById("q"),sres=document.getElementById("sres");
+q.addEventListener("input",()=>{const v=q.value.trim().toLowerCase();if(!v){sres.style.display="none";return;}
+  const hits=C.filter(c=>c.s.toLowerCase().includes(v)||(c.name||"").toLowerCase().includes(v)).sort((a,b)=>(b.s.toLowerCase()===v)-(a.s.toLowerCase()===v)||b.mc-a.mc).slice(0,8);
+  sres.innerHTML=hits.map(c=>`<button data-coin="${c.id}"><b>${esc(c.s)}</b><span class="sm na">${esc(c.name)} · ${esc(SX[c.sec].n)} · 30일 ${f1(c.c30)}</span></button>`).join("")||`<div class="sm na" style="padding:8px 10px">"${esc(q.value)}" 없음. 추적 섹터 밖이거나 시총 $70M 미만입니다.</div>`;
+  sres.style.display="block";});
+document.addEventListener("click",e=>{if(!e.target.closest(".search"))sres.style.display="none";});
+
+/* 하단 */
+document.getElementById("foot").innerHTML=`<details class="rule"><summary>버전·변경 이력</summary><p class="sm">${esc(D.rule)}</p>${D.changelog.map(([v,d,k,items])=>`<h4>v${v} · ${d} · ${k}</h4><ul>${items.map(i=>`<li class="sm">${esc(i)}</li>`).join("")}</ul>`).join("")}</details>
+<p>섹터 모니터 v${D.v} · ${esc(D.subtitle)} · ${esc(D.credit)}</p>`;
+
+function renderAll(){renderRegime();renderTabs();renderFilt();renderHome();renderEarly();renderSmall();renderPull();renderList();renderSec();renderMkt();renderBt();renderChk();}
+renderAll();
+"""
 
 
 if __name__ == "__main__":
