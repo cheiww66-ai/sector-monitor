@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CHARON 섹터 모니터 v3.1 — 과거 데이터 채우기 + 백테스트
+"""섹터 모니터 v2.0 — 과거 데이터 채우기 + 백테스트 (Team All Street · Made by Tyler)
 
 Actions 탭에서 'backfill'을 수동 실행하면:
 1. 섹터 코인들의 과거 1년 일간 가격·거래량을 CoinGecko에서 받음 (코인당 1회 호출)
@@ -62,6 +62,11 @@ def mock_hist(cid):
 
 # ═════════════════════════ 백테스트 ═════════════════════════
 def backtest(cats, hist):
+    """과거 1년에 현재 규칙을 적용.
+    - summary: 실전과 같은 선정(개수 제한·7일 중복 방지)
+    - variants: 조건을 하나씩 더했을 때의 성적 + 반대 전략(섹터보다 더 오른 코인)
+    - halves: 지금 볼 것을 앞·뒤 기간으로 나눈 성적
+    섹터 강도(중앙값)는 시총 minor_mcap 이상 전체로, 강조 후보는 pick_mcap 이상만으로 판정 (실전과 동일)"""
     btc = hist.get("bitcoin")
     if not btc:
         return None
@@ -90,16 +95,21 @@ def backtest(cats, hist):
                 info[c["id"]] = c
         members[key] = ids
     names = {s["key"]: s["name"] for s in m.SECTORS}
+    TH = m.TH
 
     def ret(p, i, j):
         return (p[j] / p[i] - 1) * 100 if p[i] and p[j] else None
 
     trades, last_pick = [], {}
+    xtr = {"small": [], "exp": []}   # 소형(참고)·상승 초입(실험) 별도 성적
+    xlast = {}
+    vtr = {k: [] for k in ("base", "lag", "lag_above", "lag_vol", "both", "lead")}
+    vlast = {}
     for i in range(30, N - 7):
         if not (B[i] and B[i - 7] and B[i - 30]):
             continue
         b7, b30 = ret(B, i - 7, i), ret(B, i - 30, i)
-        cands = []
+        cands, exp_c, small_c, sec_fwd = [], [], [], {}
         for key, ids in members.items():
             q = []
             for cid in ids:
@@ -108,9 +118,9 @@ def backtest(cats, hist):
                 if not (p[i] and p[i - 7] and p[i - 30] and mc and v):
                     continue
                 turn = v / mc
-                if mc < m.TH["minor_mcap"] or v < m.TH["min_volume"] or not (m.TH["turnover_min"] <= turn <= m.TH["turnover_max"]):
+                if mc < TH["minor_mcap"] or v < TH["min_volume"] or not (TH["turnover_min"] <= turn <= TH["turnover_max"]):
                     continue
-                q.append((cid, ret(p, i - 30, i), ret(p, i - 7, i)))
+                q.append((cid, ret(p, i - 30, i), ret(p, i - 7, i), mc))
             if len(q) < 3:
                 continue
             med30 = statistics.median(x[1] for x in q)
@@ -118,54 +128,113 @@ def backtest(cats, hist):
             rs7, rs30 = med7 - b7, med30 - b30
             if not (rs7 > 0 and rs30 > 0):   # 과거엔 온체인·선물 신호가 없어 '강한 섹터'를 가격 기준으로만 판정
                 continue
-            fwd7 = [ret(A[cid]["p"], i, i + 7) for cid, _, _ in q]
-            fwd7 = [x for x in fwd7 if x is not None]
+            fwd7 = [x for x in (ret(A[cid]["p"], i, i + 7) for cid, _, _, _ in q) if x is not None]
+            q_sec7 = statistics.median(fwd7) if fwd7 else None
             sec7 = statistics.median(fwd7) if fwd7 else None
             sec30 = None
             if i + 30 < N:
-                f30 = [x for x in (ret(A[cid]["p"], i, i + 30) for cid, _, _ in q) if x is not None]
+                f30 = [x for x in (ret(A[cid]["p"], i, i + 30) for cid, _, _, _ in q) if x is not None]
                 sec30 = statistics.median(f30) if f30 else None
-            for cid, c30, c7 in q:
-                lag = med30 - c30
-                if lag < m.TH["lag_min"]:
+            q_sec30 = sec30
+            sec_fwd[key] = (sec7, sec30)
+            # 섹터 7일 흐름 (일간 중앙값 경로) — 실험 신호 '섹터 동조'용
+            spath = []
+            for k in range(8):
+                vals = [A[c]["p"][i - 7 + k] / A[c]["p"][i - 7] - 1 for c, _, _, _ in q
+                        if A[c]["p"][i - 7] and A[c]["p"][i - 7 + k]]
+                spath.append(statistics.median(vals) if vals else 0)
+            for cid, c30, c7, mc in q:
+                p, vv = A[cid]["p"], A[cid]["v"]
+                # 실험 신호 3개 (과거 데이터로 가능한 것만)
+                cpath = [p[i - 7 + k] / p[i - 7] - 1 if p[i - 7] and p[i - 7 + k] else None for k in range(8)]
+                cr = m.corr(cpath, spath) if None not in cpath else None
+                recent = [x for x in vv[i - 2:i + 1] if x]
+                before = [x for x in vv[i - 7:i - 2] if x]
+                vt = statistics.mean(recent) / statistics.mean(before) if len(recent) == 3 and len(before) >= 4 and statistics.mean(before) > 0 else None
+                past = [x for x in p[max(0, i - TH["break_days"]):i] if x]
+                hi = max([x for x in p[:i + 1] if x] or [0])
+                brk = bool(len(past) >= TH["break_days"] - 5 and hi and (p[i] / hi - 1) * 100 <= TH["break_dd"] and p[i] > max(past))
+                hits = sum([cr is not None and cr >= TH["sync_corr"], vt is not None and vt >= TH["vol_trend"], brk])
+                if hits >= TH["exp_min_hits"]:
+                    exp_c.append((cid, key, hits, c7))
+                if mc < TH["pick_mcap"]:
+                    small_c.append((cid, key, med30 - c30))
                     continue
+                lag = med30 - c30
                 p = A[cid]["p"]
                 win = [x for x in p[i - 6:i + 1] if x]
                 above = len(win) >= 5 and p[i] > statistics.mean(win)
                 prev = [x for x in A[cid]["v"][i - 7:i] if x]
                 vr = A[cid]["v"][i] / statistics.mean(prev) if len(prev) >= 5 and statistics.mean(prev) > 0 else None
-                vol_ok = vr is not None and vr >= m.TH["vol_surge"]
-                if not (above or vol_ok):
+                vol_ok = vr is not None and vr >= TH["vol_surge"]
+                is_lag = lag >= TH["lag_min"]
+                flags = {"base": True, "lag": is_lag, "lag_above": is_lag and above, "lag_vol": is_lag and vol_ok,
+                         "both": is_lag and above and vol_ok, "lead": -lag >= TH["lag_min"] and above}
+                r7 = ret(p, i, i + 7)
+                r30 = ret(p, i, i + 30) if i + 30 < N else None
+                future = [x for x in p[i + 1:i + 8] if x]
+                low7 = min(win) if win else None
+                row = {"x7": None if r7 is None or sec7 is None else r7 - sec7,
+                       "x30": None if r30 is None or sec30 is None else r30 - sec30,
+                       "stop": bool(low7 and future and min(future) < low7)}
+                for k, ok in flags.items():
+                    if ok and ((cid, k) not in vlast or i - vlast[(cid, k)] >= 7):
+                        vlast[(cid, k)] = i
+                        vtr[k].append(row)
+                if not is_lag or not (above or vol_ok):
                     continue
                 grade = "red" if above and vol_ok else "yellow"
                 score = min(lag, 40) + ((min(vr, 3) - 1) * 10 if vr and vr > 1 else 0) + max(min(rs30, 20), 0)
-                cands.append({"cid": cid, "sec": key, "grade": grade, "score": score, "low7": min(win) if win else None,
-                              "sec7": sec7, "sec30": sec30})
+                cands.append({"cid": cid, "sec": key, "grade": grade, "score": score, "row": row, "r7": r7, "r30": r30})
+        def xrow(cid, key):
+            p = A[cid]["p"]
+            s7, s30 = sec_fwd.get(key, (None, None))
+            r7, r30 = ret(p, i, i + 7), (ret(p, i, i + 30) if i + 30 < N else None)
+            win = [x for x in p[i - 6:i + 1] if x]
+            fut = [x for x in p[i + 1:i + 8] if x]
+            return {"x7": None if r7 is None or s7 is None else r7 - s7, "x30": None if r30 is None or s30 is None else r30 - s30,
+                    "stop": bool(win and fut and min(fut) < min(win))}
+
+        def xadd(track, cid, key):
+            k = (track, cid)
+            if k in xlast and i - xlast[k] < 7:
+                return
+            xlast[k] = i
+            xtr[track].append(xrow(cid, key))
+        ebest = {}
+        for cid, key, hits, c7 in exp_c:
+            if cid not in ebest or hits > ebest[cid][1]:
+                ebest[cid] = (key, hits, c7)
+        for cid, (key, hits, c7) in sorted(ebest.items(), key=lambda kv: (-kv[1][1], -(kv[1][2] or 0)))[: TH["exp_max"]]:
+            xadd("exp", cid, key)
+        sbest = {}
+        for cid, key, lag in small_c:
+            p, v = A[cid]["p"], A[cid]["v"]
+            win = [x for x in p[i - 6:i + 1] if x]
+            above = len(win) >= 5 and p[i] > statistics.mean(win)
+            prev = [x for x in v[i - 7:i] if x]
+            vol_ok = len(prev) >= 5 and statistics.mean(prev) > 0 and v[i] / statistics.mean(prev) >= TH["vol_surge"]
+            if lag >= TH["lag_min"] and (above or vol_ok) and (cid not in sbest or lag > sbest[cid][1]):
+                sbest[cid] = (key, lag)
+        for cid, (key, lag) in sorted(sbest.items(), key=lambda kv: -kv[1][1])[:10]:
+            xadd("small", cid, key)
         # 하루 단위 선정 (실전과 같은 규칙: 코인당 최고 점수 섹터, 상한, 7일 중복 방지)
         best = {}
         for c in cands:
             if c["cid"] not in best or c["score"] > best[c["cid"]]["score"]:
                 best[c["cid"]] = c
         ranked = sorted(best.values(), key=lambda c: -c["score"])
-        red = [c for c in ranked if c["grade"] == "red"][: m.TH["red_max"]]
+        red = [c for c in ranked if c["grade"] == "red"][: TH["red_max"]]
         rid = {c["cid"] for c in red}
-        yellow = [c for c in ranked if c["cid"] not in rid][: m.TH["yellow_max"]]
+        yellow = [c for c in ranked if c["cid"] not in rid][: TH["yellow_max"]]
         for grade, picks in (("red", red), ("yellow", yellow)):
             for c in picks:
                 k = (c["cid"], grade)
                 if k in last_pick and i - last_pick[k] < 7:
                     continue
                 last_pick[k] = i
-                p = A[c["cid"]]["p"]
-                r7 = ret(p, i, i + 7)
-                r30 = ret(p, i, i + 30) if i + 30 < N else None
-                future = [x for x in p[i + 1:i + 8] if x]
-                trades.append({
-                    "date": dates[i], "id": c["cid"], "sym": info[c["cid"]]["sym"], "sec": names.get(c["sec"], c["sec"]),
-                    "g": grade, "r7": r7, "x7": None if r7 is None or c["sec7"] is None else r7 - c["sec7"],
-                    "r30": r30, "x30": None if r30 is None or c["sec30"] is None else r30 - c["sec30"],
-                    "stop": bool(c["low7"] and future and min(future) < c["low7"]),
-                })
+                trades.append({"date": dates[i], "i": i, "id": c["cid"], "sym": info[c["cid"]]["sym"],
+                               "sec": names.get(c["sec"], c["sec"]), "g": grade, "r7": c["r7"], "r30": c["r30"], **c["row"]})
 
     def summ(rows):
         x7 = [t["x7"] for t in rows if t["x7"] is not None]
@@ -176,14 +245,22 @@ def backtest(cats, hist):
                 "avg30": statistics.mean(x30) if x30 else None,
                 "stop": sum(1 for t in rows if t["stop"]) / len(rows) * 100 if rows else None}
 
+    red_t = [t for t in trades if t["g"] == "red"]
+    mid = 30 + (N - 37) // 2
+    halves = {f"앞 기간 (~{dates[mid - 1]})": summ([t for t in red_t if t["i"] < mid]),
+              f"뒤 기간 ({dates[mid]}~)": summ([t for t in red_t if t["i"] >= mid])} if N > 40 else {}
     by_sec = {}
     for t in trades:
         by_sec.setdefault(t["sec"], []).append(t)
-    return {"ts": m.NOW_TS, "start": dates[30] if N > 30 else None, "end": dates[N - 8] if N > 8 else None,
+    for t in trades:
+        t.pop("i", None)
+    return {"ts": m.NOW_TS, "v": m.VERSION, "start": dates[30] if N > 30 else None, "end": dates[N - 8] if N > 8 else None,
             "coins": len(hist) - 1, "sectors": sum(1 for v in members.values() if v),
-            "summary": {g: summ([t for t in trades if t["g"] == g]) for g in ("red", "yellow")},
+            "summary": {**{g: summ([t for t in trades if t["g"] == g]) for g in ("red", "yellow")},
+                        "small": summ(xtr["small"]), "exp": summ(xtr["exp"])},
+            "variants": {k: summ(v) for k, v in vtr.items()}, "halves": halves,
             "by_sector": {k: summ(v) for k, v in sorted(by_sec.items(), key=lambda kv: -len(kv[1]))},
-            "recent": [t for t in trades if t["g"] == "red"][-30:]}
+            "recent": red_t[-30:]}
 
 
 # ═════════════════════════ 실행 ═════════════════════════
@@ -251,6 +328,18 @@ def main():
             seeded += 1
     m.save(os.path.join(m.DATA_DIR, "volume.json"), dvol)
 
+    # 1-2) 가격 이력 채우기 (최근 61일) -> '하락 추세 돌파' 신호가 첫날부터 작동
+    phist = m.load(os.path.join(m.DATA_DIR, "price.json"), {})
+    for cid, h in hist.items():
+        if cid == "bitcoin":
+            continue
+        past = [[d, p] for d, p in zip(h["d"], h["p"]) if p][-61:]
+        if len(past) >= 25:
+            merged = {d: p for d, p in past}
+            merged.update({d: p for d, p in phist.get(cid, [])})
+            phist[cid] = sorted(([d, p] for d, p in merged.items()), key=lambda x: x[0])[-61:]
+    m.save(os.path.join(m.DATA_DIR, "price.json"), phist)
+
     # 2) 백테스트
     bt = backtest(cats, hist)
     if bt:
@@ -259,7 +348,7 @@ def main():
     s = (bt or {}).get("summary", {}).get("red", {})
     print(f"완료: 새로 받음 {fetched}, 건너뜀 {skipped}, 실패 {failed}, 거래량 채움 {seeded}개")
     if bt:
-        print(f"백테스트 {bt['start']}~{bt['end']} | 지금 볼 것 7일: n={s.get('n7')}, "
+        print(f"백테스트 v{bt['v']} {bt['start']}~{bt['end']} | 지금 볼 것 7일: n={s.get('n7')}, "
               f"섹터보다 좋았던 비율={s.get('win7') and round(s['win7'], 1)}%")
     for x in notes:
         print(" -", x)
