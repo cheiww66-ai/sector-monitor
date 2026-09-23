@@ -21,12 +21,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "3.0"
+VERSION = "3.1"
 RELEASED = "2026-09-24"
 CREDIT = "Made by Tyler"
 SUBTITLE = "Project Charon for Team All Street"
 VERSION_RULE = "큰 업데이트(x.0)는 코인을 고르는 규칙이 바뀐 것, 작은 업데이트(x.1)는 화면·표시만 바뀐 것입니다. 실전 성적은 큰 버전별로 따로 집계합니다."
 CHANGELOG = [
+    ("3.1", "2026-09-24", "작은 업데이트", [
+        "RSI(14) 추가: 75 이상은 '과열·추격 금지' 경고, 상승 추세(200일선 위)에서 30~45는 '과매도 눌림' 진입 타이밍",
+        "익절 구간 기준 축소: 급등 누적 +100% → +150%. 사이클 1~3단계에서는 '익절 참고'로 약하게 표시",
+        "시장 폭 막대를 누르면 해당 코인 목록이 펼쳐짐",
+        "상장 공지: 바이낸스는 현물 신규 상장만, 거래 시작 시각과 코인 표시. 상장 후보에 코인 나이(거래소 기준)",
+        "상위 20개 거래소 상장 수를 더 빨리 채움 (코인당 14일마다 갱신)",
+        "GitHub 액션 버전을 Node 24용으로 올림 (Node 20 경고 해결)",
+        "백테스트에 RSI 과열·과매도 눌림·꺾임 주의 적중률 추가, 2.0 기록 빈 값 오류 수정",
+    ]),
     ("3.0", "2026-09-24", "큰 업데이트", [
         "탭 화면(순위·초입 후보·소형 도전·눌림목·상장·섹터·시장·성적표·데이터 점검), 항상 다크 모드, 2시간마다 갱신",
         "덜 오름 기준을 섹터 안 표준점수(중앙값·MAD)로 변경. Top 3는 시총 순, 한 번 들어오면 느슨한 기준까지 유지",
@@ -116,7 +125,7 @@ TH = {  # 판정 기준 (숫자만 바꾸면 기준이 바뀜)
     # 20일선 재돌파
     "reclaim_days": 5, "reclaim_vol": 1.5,
     # 익절 경보 (팀 리더 조언)
-    "tp_run": 100.0, "tp_near": -10.0, "wave_dd": -25.0, "brk_run": 80.0, "brk_off": -20.0,
+    "tp_run": 150.0, "rsi_hot": 75.0, "rsi_dip_lo": 30.0, "rsi_dip_hi": 45.0, "tp_near": -10.0, "wave_dd": -25.0, "brk_run": 80.0, "brk_off": -20.0,
 }
 LIST_VENUES = {"Bitget": "bitget", "OKX": "okex", "Binance": "binance", "Upbit": "upbit"}   # 상장 필터 거래소 (CoinGecko id)
 VENUE_CODE = {"Upbit": "U", "Bitget": "G", "OKX": "O", "Binance": "B"}
@@ -128,7 +137,7 @@ EXCLUDE_WORDS = ("wrapped", "staked", "bridged", "liquid staking", "restaked", "
 DAY_S = 86400
 MARKET_PAGES = 4          # 시총 상위 250 × 4 = 1000개
 CANDLE_DAYS = 210
-TICKER_BUDGET = 48        # 하루에 새로 확인할 '상위 20개 거래소 상장 수' 코인 수
+TICKER_BUDGET = 180       # 하루에 새로 확인할 '상위 20개 거래소 상장 수' 코인 수
 CG_CANDLE_BUDGET = 40     # 거래소 일봉이 없는 코인에 CoinGecko 일봉을 받는 하루 한도
 
 
@@ -532,29 +541,62 @@ def fetch_bithumb():
     return sorted(k.upper() for k in d if k != "date")
 
 
+def title_syms(t):
+    """공지 제목의 괄호 속 심볼: 'Binance Will List Foo (FOO)', '바이프로스트(BFC) 원화 마켓' → ['FOO']"""
+    return [x for x in re.findall(r"\(([A-Z0-9]{2,12})\)", t) if x not in ("KRW", "BTC", "USDT", "UTC", "USD")]
+
+
+def start_time(text):
+    """공지 본문에서 거래 시작 시각 찾기 → 'MM-DD HH:MM (KST)'"""
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    m = re.search(r"(20\d\d)-(\d\d)-(\d\d) (\d\d):(\d\d) \(UTC\)", text)
+    if m:
+        t = dt.datetime(*map(int, m.groups()), tzinfo=UTC).astimezone(KST)
+        return t.strftime("%m-%d %H:%M")
+    m = re.search(r"(\d{1,2})월\s*(\d{1,2})일[^0-9]{0,12}(\d{1,2})[시:]\s*(\d{1,2})?", text)
+    if m:
+        mo, d, h, mi = m.group(1), m.group(2), m.group(3), m.group(4) or "0"
+        return f"{int(mo):02d}-{int(d):02d} {int(h):02d}:{int(mi):02d}"
+    return None
+
+
 def fetch_upbit_notices():
     d = get_json("https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=20&category=trade", retries=1, timeout=20)
     out = []
     for n in ((d.get("data") or {}).get("notices") or []):
         t = n.get("title") or ""
-        if "거래지원" in t and ("신규" in t or "추가" in t):
-            out.append({"d": (n.get("listed_at") or n.get("first_listed_at") or "")[:10], "ex": "업비트", "t": t,
-                        "u": f"https://upbit.com/service_center/notice?id={n.get('id')}"})
-    return out[:10]
+        if "거래지원" in t and ("신규" in t or "추가" in t) or "디지털 자산 추가" in t:
+            start = None
+            try:
+                body = get_json(f"https://api-manager.upbit.com/api/v1/announcements/{n.get('id')}", retries=1, timeout=15)
+                start = start_time(((body.get("data") or {}).get("body")) or "")
+            except Exception:
+                pass
+            out.append({"d": (n.get("listed_at") or n.get("first_listed_at") or "")[:10], "ex": "업비트", "t": t, "syms": title_syms(t),
+                        "start": start, "u": f"https://upbit.com/service_center/notice?id={n.get('id')}"})
+    return out[:8]
 
 
 def fetch_binance_notices():
-    d = get_json("https://www.binance.com/bapi/composite/v1/public/cms/article/list/query?type=1&catalogId=48&pageNo=1&pageSize=15",
+    """현물 신규 상장만 (선물·마진·담보·Alpha 공지 제외)"""
+    d = get_json("https://www.binance.com/bapi/composite/v1/public/cms/article/list/query?type=1&catalogId=48&pageNo=1&pageSize=20",
                  retries=1, timeout=20)
     out = []
     for cat in ((d.get("data") or {}).get("catalogs") or []):
         for a in cat.get("articles") or []:
             t = a.get("title") or ""
-            if "Will List" in t or "Will Add" in t:
-                ts = a.get("releaseDate")
-                out.append({"d": utc_day(ts / 1000) if ts else "", "ex": "바이낸스", "t": t,
-                            "u": f"https://www.binance.com/en/support/announcement/{a.get('code', '')}"})
-    return out[:10]
+            if "Will List" not in t or any(w in t for w in ("Futures", "Margin", "Perpetual", "Collateral", "Alpha", "Options", "Pre-Market")):
+                continue
+            ts, start = a.get("releaseDate"), None
+            try:
+                body = get_json("https://www.binance.com/bapi/composite/v1/public/cms/article/detail/query?articleCode=" + str(a.get("code", "")),
+                                retries=1, timeout=15)
+                start = start_time(str((body.get("data") or {}).get("body") or ""))
+            except Exception:
+                pass
+            out.append({"d": utc_day(ts / 1000) if ts else "", "ex": "바이낸스", "t": t, "syms": title_syms(t), "start": start,
+                        "u": f"https://www.binance.com/en/support/announcement/{a.get('code', '')}"})
+    return out[:8]
 
 
 # ═════════════════════════ 모의 데이터 (MOCK=1 테스트용) ═════════════════════════
@@ -681,13 +723,15 @@ def coin_metrics(c, cd):
     """거래소 일봉(마감 봉) + 현재가 = 트레이딩뷰 일봉 이평과 같은 방식"""
     out = {"src": None, "tv": None, "c3": None, "c180": None, "ma20": None, "ma60": None, "ma100": None, "ma200": None,
            "hi30": None, "brk": False, "slope": None, "hl": False, "rc": 0, "vx": None, "vd": None, "run": None, "offpk": None,
-           "tp": None, "spark": [], "ma20line": [], "wk": [None] * 4, "r90": None}
+           "tp": None, "spark": [], "ma20line": [], "wk": [None] * 4, "r90": None, "rsi": None, "age": None}
     if not cd or len(cd.get("c") or []) < 25 or not c.get("px"):
         return out
     cl = [x for x in cd["c"] if x]
     px = c["px"]
     s = cl + [px]
-    out.update(src=cd.get("src"), tv=cd.get("tv"))
+    out.update(src=cd.get("src"), tv=cd.get("tv"), rsi=rsi(s))
+    if len(cd.get("d") or []) < CANDLE_DAYS - 5:   # 기록이 210일보다 짧으면 그 거래소 상장 후 경과일
+        out["age"] = len(cd["d"])
     out["c3"] = pct(px, cl[-3]) if len(cl) >= 3 else None
     out["c180"] = pct(px, cl[-180]) if len(cl) >= 180 else None
     out["r90"] = pct(px, cl[-90]) if len(cl) >= 90 else None
@@ -736,6 +780,19 @@ def coin_metrics(c, cd):
     out["tp"] = tp
     out["wk"] = [pct(s[-b], s[-a]) if len(s) > a else None for a, b in ((29, 22), (22, 15), (15, 8), (8, 1))]
     return out
+
+
+def rsi(xs, n=14):
+    """Wilder RSI (트레이딩뷰 기본 RSI와 같은 방식). 마지막 값"""
+    xs = [x for x in xs if x]
+    if len(xs) < n + 1:
+        return None
+    g = [max(xs[i] - xs[i - 1], 0) for i in range(1, len(xs))]
+    lo = [max(xs[i - 1] - xs[i], 0) for i in range(1, len(xs))]
+    ag, al = sum(g[:n]) / n, sum(lo[:n]) / n
+    for i in range(n, len(g)):
+        ag, al = (ag * (n - 1) + g[i]) / n, (al * (n - 1) + lo[i]) / n
+    return 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
 
 
 def rz(x, xs):
@@ -844,6 +901,10 @@ def build_world(markets, sec_ids, candles, derivs, listing, upx, oi_prev, short,
             w.append(f"30일 +{c['c30']:.0f}%")
         if c["ma20"] and not c["a20"]:
             w.append("20일선 아래")
+        if c["rsi"] is not None and c["rsi"] >= TH["rsi_hot"]:
+            w.append(f"RSI {c['rsi']:.0f} 과열 · 추격 금지")
+        trend = c["ma200"] or c["ma100"] or c["ma60"]
+        c["dip"] = bool(c["rsi"] is not None and TH["rsi_dip_lo"] <= c["rsi"] <= TH["rsi_dip_hi"] and trend and c["px"] > trend)
         c["warns"] = w
         c["hard"] = (c["mc"] >= TH["pick_mcap"] and c["vol"] >= TH["pick_volume"] and len(c["L"]) >= 2
                      and (c["fund"] is None or c["fund"] < TH["funding_hot"]) and not c["uwarn"])
@@ -1104,7 +1165,7 @@ def telegram(new_top):
 COIN_KEYS = ["id", "sym", "name", "sec", "secs", "px", "mc", "vol", "c1", "c3", "c7", "c30", "c180", "ma20", "ma60", "ma100", "ma200",
              "hi30", "brk", "slope", "hl", "rc", "vx", "spark", "ma20line", "z30", "z7", "srank", "sn", "mrank", "L", "fund", "oi", "sh",
              "upx", "ex20", "uwarn", "under", "a20", "cvol", "cfirst", "sq", "sqn", "squeeze", "warns", "fatal", "hard", "sig", "nsig",
-             "score", "pull", "pullmiss", "reclaim", "kept", "run", "offpk", "tp", "tv", "src", "listwhy", "topRank"]
+             "score", "pull", "pullmiss", "reclaim", "kept", "run", "offpk", "tp", "tv", "src", "listwhy", "topRank", "rsi", "dip", "age"]
 
 
 def slim(c):
@@ -1246,7 +1307,7 @@ def main():
     # 6) 업비트 마켓·빗썸·상장 공지 (하루 1번)
     if MOCK:
         cache["upb_mk"], cache["bithumb"] = mock_upbit_markets(markets), []
-        cache["news"] = [{"d": today, "ex": "업비트", "t": "[거래] 모의 코인(MOCK) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)", "u": "https://upbit.com"}]
+        cache["news"] = [{"d": today, "ex": "업비트", "t": "[거래] 모의 코인(C001) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)", "syms": ["C001"], "start": "09-24 17:00", "u": "https://upbit.com"}]
     elif daily("kr_ts") or not cache.get("upb_mk"):
         um = safe("업비트 마켓", fetch_upbit_markets, None, "업비트 마켓")
         if um:
@@ -1323,7 +1384,7 @@ def main():
                 cache["top20"], cache["top20_ts"] = t20, NOW_TS
         top20 = [x["id"] for x in cache.get("top20") or []]
         order = [i for i in (state.get("shown") or []) if i in tracked] + sorted(tracked, key=lambda i: -markets[i]["mc"])
-        todo = [i for i in dict.fromkeys(order) if NOW_TS - (ex20c.get(i) or [0])[0] > 7 * DAY_S][:TICKER_BUDGET // 12 + 1]
+        todo = [i for i in dict.fromkeys(order) if NOW_TS - (ex20c.get(i) or [0])[0] > 14 * DAY_S][:TICKER_BUDGET // 12]
         for i in todo:
             r = safe(f"{markets[i]['sym']} 거래소 목록", lambda c=i: fetch_coin_exchanges(c), None)
             if r is not None:
@@ -1382,7 +1443,7 @@ def main():
          "listc": [c["id"] for c in W["listc"]], "changes": W["changes"], "mk": W["mk"],
          "excluded": sum(1 for c in W["coins"].values() if c["fatal"]), **M,
          "board": scoreboard(log), "bt": load(os.path.join(DATA_DIR, "backtest.json"), None),
-         "news": cache.get("news") or [], "cmc": cache.get("cmc_sum"), "top20": [x["name"] for x in cache.get("top20") or []],
+         "news": cache.get("news") or [], "ex20n": [len(ex20), len(W["coins"])], "cmc": cache.get("cmc_sum"), "top20": [x["name"] for x in cache.get("top20") or []],
          "src": src, "errors": NOTES + errors, "invite": TG_INVITE, "calls": CALLS["cg"],
          "changelog": CHANGELOG, "rule": VERSION_RULE, "credit": CREDIT, "subtitle": SUBTITLE, "released": RELEASED}
     for s in D["secs"]:
@@ -1635,6 +1696,10 @@ details.sd[open] .sec{border-bottom:0}
 .st.nx{outline:1px dashed var(--accent-line)}.st.nx i{background:var(--accent-line)}
 @media (max-width:700px){.steps{grid-template-columns:repeat(4,1fr)}}
 .tier{display:grid;grid-template-columns:62px 1fr 56px;gap:8px;align-items:center;font-size:.85rem;padding:5px 0}
+.hrow{display:grid;grid-column:1/-1;grid-template-columns:150px 1fr 44px;gap:10px;align-items:center;width:100%;padding:0;cursor:pointer;background:none;border:0;color:inherit;font:inherit;text-align:left}
+.hrow .hl{color:var(--text)}.hrow:hover .hl{color:var(--accent)}
+.brl{grid-column:1/-1;padding:4px 0 8px;border-bottom:1px dashed var(--line)}
+@media (max-width:640px){.hrow{grid-template-columns:110px 1fr 40px}}
 :root,:root[data-theme]{color-scheme:dark;--bg:#1e1e1e;--bg2:#262626;--bg3:#303030;--line:#383838;--text:#dcddde;--muted:#a3a3a3;--faint:#767676;--accent:#a88bfa;--accent-bg:rgba(168,139,250,.11);--accent-line:rgba(168,139,250,.5);--up:#5cc99a;--down:#e5776e;--amber:#e3b25c;--amber-bg:rgba(227,178,92,.11);--info:#78b0e6;--info-bg:rgba(110,168,224,.11)}
 .z0{background:color-mix(in srgb,var(--up) 55%,transparent)}.z1{background:color-mix(in srgb,var(--up) 28%,transparent)}
 .z2{background:color-mix(in srgb,var(--amber) 45%,transparent)}.z3{background:color-mix(in srgb,var(--down) 30%,transparent)}.z4{background:color-mix(in srgb,var(--down) 55%,transparent)}
@@ -1697,12 +1762,16 @@ function ladder(c,leg=true){
 }
 const secTxt=c=>`<span class="secchip">${esc(SX[c.sec].n)} · 수익률 ${c.srank}/${c.sn}위 · 시총 ${c.mrank}위</span>`;
 const vtxt=c=>c.vx==null?"—":`${c.vx.toFixed(1)}배<span class="vbar" aria-hidden="true"><i style="width:${Math.min(c.vx/3,1)*100}%"></i></span>`;
-function badges(c){let b="";if(c.tp)b+=chip(c.tp[0]==="꺾임 주의"?"꺾임 주의":"익절 구간","warn");if(c.squeeze)b+=chip("스퀴즈 준비","hot");if(c.kept)b+=chip("유지 중","ok");return b;}
+let STG=null;const stg=()=>STG||(STG=stageNow());
+function tpChip(c){if(!c.tp)return "";if(c.tp[0]==="꺾임 주의")return chip("꺾임 주의","warn");const late=stg().cur>=3&&stg().cur<=5;return chip(late?"익절 구간":"익절 참고",late?"warn":"");}
+function badges(c){let b=tpChip(c);if(c.dip)b+=chip("과매도 눌림","ok");if(c.squeeze)b+=chip("스퀴즈 준비","hot");if(c.kept)b+=chip("유지 중","ok");return b;}
 const warns=c=>(c.warns||[]).map(w=>chip(w,"warn")).join("");
 const sigTxt=c=>`<div class="sm" style="white-space:normal;color:var(--info)" title="${c.sig.filter(x=>x[1]).map(x=>x[0]).join(", ")}">신호 ${c.nsig} · ${c.sig.filter(x=>x[1]&&x[0]!=="스퀴즈 준비").map(x=>x[0]).slice(0,3).join(" · ")}</div>`;
 function stopTxt(c){
   for(const n of [20,60,100,200]){const v=c["ma"+n];if(v&&c.px>v)return `${n}일선 ${px(v)} 아래 마감`;}
   return "모든 이평선 아래 · 최근 저점 이탈";}
+const rsiTxt=c=>c.rsi==null?`<span class="na">—</span>`:`<span class="${c.rsi>=TH.rsi_hot?"dn":c.rsi<=TH.rsi_dip_lo?"up":""}">${c.rsi.toFixed(0)}</span>`;
+const ageTxt=c=>c.age==null?`<span class="na">210일+</span>`:`<span class="num">${c.age}일</span>`;
 const nEx=c=>c.ex20==null?`<span class="na">—</span>`:`<span class="num">${c.ex20}<span class="na">/20</span></span>`;
 
 /* 사이클 (팀 리더 조언 8단계) */
@@ -1750,9 +1819,9 @@ function renderHome(){
   const seg=`<div class="ctl"><span class="seg">${Object.entries(per).map(([k,t])=>`<button data-rk="${k}" aria-pressed="${rk===k}">${t}</button>`).join("")}</span><span class="sm na">${rk==="sq"?"숏이 몰린 코인 · 신호 2개 이상":"가장 많이 오른 코인 15개"}</span></div>`;
   if(rk==="sq")return renderSq(seg);
   const rows=live.filter(c=>shown(c)&&c[rk]!=null).sort((a,b)=>b[rk]-a[rk]).slice(0,15);
-  document.getElementById("p-home").innerHTML=seg+(rows.length?`<div class="tbl"><table><thead><tr><th>#</th><th style="text-align:left">코인</th><th>30일 흐름</th><th>${per[rk]}</th><th>24h 거래량</th><th>거래량 변화</th><th>시총</th><th title="거래대금 상위 20개 거래소 중 상장된 곳">상장 거래소</th><th></th></tr></thead><tbody>
-  ${rows.map((c,i)=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td class="na">${i+1}</td><td style="text-align:left"><span class="nm">${esc(c.s)}</span> <span class="secchip">${esc(SX[c.sec].n)}</span><div class="chips">${c.tp?chip(c.tp[0]==="꺾임 주의"?"꺾임 주의":"익절 구간","warn"):""}${c.topRank?chip("추천","hot"):""}${c.uwarn?chip("업비트 유의","warn"):""}</div></td>
-  <td class="sp">${spark(c)}</td><td class="num ${cls(c[rk])}"><b>${f1(c[rk])}</b></td><td class="num">${usd(c.vol)}</td><td class="num">${vtxt(c)}</td><td class="num">${usd(c.mc)}</td><td>${nEx(c)}</td><td>${tvBtn(c)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">${rk==="c180"?"180일 기록이 아직 부족합니다 (일봉 180개 필요)":"해당 코인 없음"}</div>`)+
+  document.getElementById("p-home").innerHTML=seg+(rows.length?`<div class="tbl"><table><thead><tr><th>#</th><th style="text-align:left">코인</th><th>30일 흐름</th><th>${per[rk]}</th><th>24h 거래량</th><th>거래량 변화</th><th title="RSI(14) 일봉. 75 이상 과열, 30 이하 과매도">RSI</th><th>시총</th><th title="거래대금 상위 20개 거래소 중 상장된 곳">상장 거래소</th><th></th></tr></thead><tbody>
+  ${rows.map((c,i)=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td class="na">${i+1}</td><td style="text-align:left"><span class="nm">${esc(c.s)}</span> <span class="secchip">${esc(SX[c.sec].n)}</span><div class="chips">${tpChip(c)}${c.dip?chip("과매도 눌림","ok"):""}${c.topRank?chip("추천","hot"):""}${c.uwarn?chip("업비트 유의","warn"):""}</div></td>
+  <td class="sp">${spark(c)}</td><td class="num ${cls(c[rk])}"><b>${f1(c[rk])}</b></td><td class="num">${usd(c.vol)}</td><td class="num">${vtxt(c)}</td><td class="num">${rsiTxt(c)}</td><td class="num">${usd(c.mc)}</td><td>${nEx(c)}</td><td>${tvBtn(c)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">${rk==="c180"?"180일 기록이 아직 부족합니다 (일봉 180개 필요)":"해당 코인 없음"}</div>`)+
   `<h3>대장</h3><div class="chips">${D.lead.vol?chip(`거래대금 대장 ${D.lead.vol.s} ${f1(D.lead.vol.c30,0)}`,"hot"):""}${D.lead.ret?chip(`상승률 대장 ${D.lead.ret.s} ${f1(D.lead.ret.c30,0)}`,"hot"):""}</div>
   ${D.changes.length?`<h3>추천 변화</h3><div class="chips">${D.changes.map(x=>`<span class="chip ${x.t==="in"?"ok":""}" title="${esc(x.why.join(", "))}">${x.t==="in"?"＋":"－"} ${esc(x.s)} · ${esc(x.why[0])}</span>`).join("")}</div>`:""}`;
 }
@@ -1824,10 +1893,11 @@ function renderPull(){
 function renderList(){
   const L=LISTC.filter(shown);
   document.getElementById("p-list").innerHTML=`<h3 style="margin-top:0">최근 상장 공지</h3>
-  ${D.news.length?`<div class="tbl"><table><tbody>${D.news.map(n=>`<tr><td style="text-align:left" class="na">${esc(n.d)}</td><td style="text-align:left">${esc(n.ex)}</td><td style="text-align:left;white-space:normal"><a href="${esc(n.u)}" target="_blank" rel="noopener">${esc(n.t)}</a></td></tr>`).join("")}</tbody></table></div>`:'<div class="empty">공지를 받지 못했습니다 (데이터 점검 탭 참고).</div>'}
+  ${D.news.length?`<div class="tbl"><table><thead><tr><th style="text-align:left">공지일</th><th style="text-align:left">거래소</th><th style="text-align:left">거래 시작 (한국 시간)</th><th style="text-align:left">코인</th><th style="text-align:left">공지</th></tr></thead><tbody>${D.news.map(n=>{const cs=(n.syms||[]).map(s=>C.find(c=>c.s===s)||s);
+   return `<tr><td style="text-align:left" class="na">${esc(n.d)}</td><td style="text-align:left">${esc(n.ex)}</td><td style="text-align:left">${n.start?`<b>${esc(n.start)}</b>`:'<span class="na">본문 확인</span>'}</td><td style="text-align:left">${cs.map(c=>typeof c==="string"?chip(c):`<span class="chip hot" data-coin="${c.id}" style="cursor:pointer">${esc(c.s)}</span>`).join("")}</td><td style="text-align:left;white-space:normal"><a href="${esc(n.u)}" target="_blank" rel="noopener">${esc(n.t)}</a></td></tr>`;}).join("")}</tbody></table></div>`:'<div class="empty">공지를 받지 못했습니다 (데이터 점검 탭 참고).</div>'}
   <h3>상장 후보 <span class="sm na">업비트 원화·바이낸스 미상장 · 거래량 $5M+</span></h3>
-  <div class="tbl"><table><thead><tr><th>코인</th><th>30일 흐름</th><th style="text-align:left">근거</th><th>상장</th><th>7일</th><th>24h 거래량</th><th></th></tr></thead><tbody>
-  ${L.map(c=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td><span class="nm">${esc(c.s)}</span> <span class="secchip">${esc(SX[c.sec].n)}</span></td><td class="sp">${spark(c)}</td><td style="text-align:left">${c.listwhy.map(w=>chip(w,"ok")).join("")}</td><td>${nEx(c)}</td><td class="num ${cls(c.c7)}">${f1(c.c7)}</td><td class="num">${usd(c.vol)}</td><td>${tvBtn(c)}</td></tr>`).join("")||'<tr><td colspan="7" class="na">해당 코인 없음</td></tr>'}</tbody></table></div>`;
+  <div class="tbl"><table><thead><tr><th>코인</th><th>30일 흐름</th><th style="text-align:left">근거</th><th title="거래소 일봉 기준 거래 시작 후 경과일">나이</th><th>상장</th><th>7일</th><th>24h 거래량</th><th></th></tr></thead><tbody>
+  ${L.map(c=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td><span class="nm">${esc(c.s)}</span> <span class="secchip">${esc(SX[c.sec].n)}</span></td><td class="sp">${spark(c)}</td><td style="text-align:left">${c.listwhy.map(w=>chip(w,"ok")).join("")}</td><td>${ageTxt(c)}</td><td>${nEx(c)}</td><td class="num ${cls(c.c7)}">${f1(c.c7)}</td><td class="num">${usd(c.vol)}</td><td>${tvBtn(c)}</td></tr>`).join("")||'<tr><td colspan="8" class="na">해당 코인 없음</td></tr>'}</tbody></table></div>`;
 }
 
 /* 섹터 */
@@ -1853,6 +1923,12 @@ document.getElementById("p-sec").addEventListener("click",e=>{const b=e.target.c
   if(b.dataset.ss)secSort=b.dataset.ss;if(b.dataset.sd)secDir=+b.dataset.sd;if(b.dataset.co)coinOrd=b.dataset.co;renderSec();});
 
 /* 시장 */
+let brOpen=null;
+const BRF=[[c=>c.c7>0,c=>c.c7,"7일"],[c=>c.c30>0,c=>c.c30,"30일"],[c=>c.run!=null&&c.run>=50,c=>c.run,"90일 저점 대비"],[c=>c.run!=null&&c.run>=100,c=>c.run,"90일 저점 대비"],
+ [c=>c.tp&&c.tp[0]!=="꺾임 주의",c=>c.run,"90일 저점 대비"],[c=>c.tp&&c.tp[0]==="꺾임 주의",c=>c.offpk,"고점 대비"]];
+function breadthList(i){const [f,v,lab]=BRF[i];const L=C.filter(c=>f(c)&&shown(c)).sort((a,b)=>(i===5?v(a)-v(b):v(b)-v(a)));
+  return `<p class="sm na">${L.length}개 · ${lab} 순 · 누르면 상세</p><div class="chips">${L.slice(0,80).map(c=>`<span class="chip" data-coin="${c.id}" style="cursor:pointer">${esc(c.s)} <b class="${cls(v(c))}">${f1(v(c),0)}</b></span>`).join("")}${L.length>80?chip(`외 ${L.length-80}개`):""}</div>`;}
+document.getElementById("p-mkt").addEventListener("click",e=>{const b=e.target.closest("[data-br]");if(!b)return;const i=+b.dataset.br;brOpen=brOpen===i?null:i;renderMkt();});
 const bar=(v,col="var(--info)")=>`<span class="hb"><i style="width:${Math.max(0,Math.min(100,v))}%;background:${col}"></i></span>`;
 function renderMkt(){
   const y=D.cyc,r=D.disp&&D.disp.norm?D.disp.now/D.disp.norm:null,T=D.tiers||[];
@@ -1883,7 +1959,7 @@ function renderMkt(){
    <div class="chips">${[["CRYPTOCAP:BTC.D","BTC.D"],["CRYPTOCAP:TOTAL3","TOTAL3"],["CRYPTOCAP:TOTAL3/CRYPTOCAP:BTC","TOTAL3÷BTC"],["CRYPTOCAP:OTHERS.D","OTHERS.D"]].map(([s,t])=>`<a class="tvb" href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(s)}" target="_blank" rel="noopener">${t}</a>`).join("")}</div></div></div>
   <div class="grid2" style="margin-top:14px">
   <div class="box"><div class="bh"><h3>시장 폭</h3><span class="sm na">추적 ${y.n}개</span></div>
-   <div class="hg">${hist.map(([n,v,c])=>`<span class="hl">${n}</span>${bar(v,c)}<span class="hv num">${v.toFixed(0)}%</span>`).join("")}</div>
+   <div class="hg">${hist.map(([n,v,c],i)=>`<button class="hrow" data-br="${i}" aria-expanded="${brOpen===i}"><span class="hl">${n} ▾</span>${bar(v,c)}<span class="hv num">${v.toFixed(0)}%</span></button>${brOpen===i?`<div class="brl">${breadthList(i)}</div>`:""}`).join("")}</div>
    <p class="sm na" style="margin:6px 0 0">7일간 오른 코인: 1주 전 ${y.b7p.toFixed(0)}% → 지금 ${y.b7.toFixed(0)}%</p></div>
   <div class="box"><div class="bh"><h3>섹터 순환</h3>${r==null?"":`<span class="state ${r>=2?"turn":"bounce"}">${r>=2?"순환장":"같이 움직임"}</span>`}</div>
    ${r==null?'<p class="sm na">계산 불가</p>':`<div class="rot"><span class="hb" style="position:relative"><i style="width:${Math.min(r/3,1)*100}%;background:var(--accent)"></i><b style="left:66.6%"></b></span><span class="num">${r.toFixed(1)}배</span></div>
@@ -1902,11 +1978,12 @@ function verdict(x){if(!x||!x.n7||x.n7<30)return "wait";if(x.win7>50&&x.med7>0&&
 function renderBt(){
   const b=D.bt,live3=D.board;
   const BL=b&&b.v&&b.v.startsWith("3")?b:null;
-  const names={top:"Top 3",early:"초입 후보",small:"소형 도전",pull:"눌림목 (지지 중)",reclaim_turn:"20일선 재돌파: 전환",reclaim_bounce:"20일선 재돌파: 반등",lead:"반대 전략: 섹터 1등 코인",tp:"익절 경보가 뜬 코인"};
+  const names={top:"Top 3",early:"초입 후보",small:"소형 도전",pull:"눌림목 (지지 중)",reclaim_turn:"20일선 재돌파: 전환",reclaim_bounce:"20일선 재돌파: 반등",rsi_dip:"상승 추세 RSI 과매도 눌림",lead:"반대 전략: 섹터 1등 코인",tp:"경보: 익절 구간",fall:"경보: 꺾임 주의",rsi_hot:"경보: RSI 과열 (75↑)"};
+  const ALARM=new Set(["tp","fall","rsi_hot"]);
   const exps={z10:"덜 오름 z −1.0",score:"Top 3 점수 순",rs:"상대강도선 20일선 위",nocap:"상한 없음 (7일·30일)"};
   document.getElementById("p-bt").innerHTML=`<p class="sm na" style="margin:0 0 8px">막대 = 7일 뒤 같은 섹터 중간값보다 더 오른 비율 (가운데 선 50%) · 중간값 · 표본. 판정: 표본 30개 이상에서 승률·중간값·평균이 모두 좋으면 유지</p>
   <h3 style="margin-top:0">과거 1년 백테스트 ${BL?`<span class="sm na">${BL.start} ~ ${BL.end} · 코인 ${BL.coins}개</span>`:""}</h3>
-  ${BL?Object.entries(names).filter(([k])=>BL.lists[k]).map(([k,n])=>btRow(n,BL.lists[k],k==="lead"?"base":k==="tp"?(BL.lists.tp.med7<0?"keep":"watch"):verdict(BL.lists[k]),k==="lead"?"비교 기준":k==="tp"?"중간값이 마이너스면 경보가 맞은 것":"")).join(""):'<div class="empty">3.0 백테스트가 아직 없습니다. Actions → backfill → Run workflow를 실행하세요.</div>'}
+  ${BL?Object.entries(names).filter(([k])=>BL.lists[k]).map(([k,n])=>btRow(n,BL.lists[k],k==="lead"?"base":ALARM.has(k)?(BL.lists[k].med7<0?"keep":"drop"):verdict(BL.lists[k]),k==="lead"?"비교 기준":ALARM.has(k)?"경보는 중간값이 마이너스여야 맞은 것":"")).join(""):'<div class="empty">3.0 백테스트가 아직 없습니다. Actions → backfill → Run workflow를 실행하세요.</div>'}
   ${BL&&BL.exp?`<details class="rule"><summary>실험 (Top 3 변형)</summary>${Object.entries(exps).filter(([k])=>BL.exp[k]).map(([k,n])=>btRow(n,BL.exp[k],verdict(BL.exp[k]),"")).join("")}
    ${BL.alt?`<h4>알트시즌 구간별 Top 3</h4>${Object.entries(BL.alt).map(([k,x])=>btRow("알트시즌 "+k,x,verdict(x),"")).join("")}`:""}
    ${BL.halves?`<h4>기간 나눠 보기 (Top 3)</h4>${Object.entries(BL.halves).map(([k,x])=>btRow(k,x,x&&x.win7>50?"keep":"watch","")).join("")}`:""}</details>`:""}
@@ -1926,6 +2003,7 @@ function renderChk(){
   ${D.errors.length?`<details class="rule" open><summary>받지 못한 데이터 ${D.errors.length}건</summary><ul>${D.errors.map(e=>`<li>${esc(e)}</li>`).join("")}</ul></details>`:""}
   ${D.cmc?`<p class="sm">CMC 교차 확인: ${D.cmc.ok}개 일치 · ${D.cmc.bad}개 3% 넘게 차이${D.cmc.worst.length?` (${esc(D.cmc.worst.join(", "))})`:""}</p>`:""}
   <h3>데이터 출처</h3><div class="tbl"><table><tbody>${SRC.map(([n,u,w])=>`<tr><td style="text-align:left"><a href="${u}" target="_blank" rel="noopener">${n}</a></td><td style="text-align:left;white-space:normal" class="sm">${w}</td></tr>`).join("")}</tbody></table></div>
+  ${D.ex20n?`<p class="sm">상위 20개 거래소 상장 수: ${D.ex20n[0]}/${D.ex20n[1]}개 확인 (하루 약 180개씩, 코인당 14일마다 갱신)</p>`:""}
   ${D.top20.length?`<p class="sm na">상장 수 기준 거래소 (거래대금 상위 20): ${esc(D.top20.join(", "))}</p>`:""}
   <h3>트레이딩뷰 대조</h3><p class="sm na">차트 버튼 → 일봉 → 이동평균(단순) 20·60·100·200. 이 사이트는 ${D.cday}까지 마감된 봉 + 현재가로 계산하므로 트레이딩뷰 현재 봉 값과 같아야 합니다 (갱신 시각 차이만큼 오차).</p>
   <div class="tbl"><table><thead><tr><th style="text-align:left">코인</th><th style="text-align:left">일봉 출처</th><th>현재가</th><th>20</th><th>60</th><th>100</th><th>200</th><th></th></tr></thead><tbody>
@@ -1944,6 +2022,7 @@ function openCoin(id){
   <div class="kv num"><span>1일 / 7일 / 30일 / 180일</span><span><span class="${cls(c.c1)}">${f1(c.c1)}</span> / <span class="${cls(c.c7)}">${f1(c.c7)}</span> / <span class="${cls(c.c30)}">${f1(c.c30)}</span> / <span class="${cls(c.c180)}">${f1(c.c180)}</span></span></div>
   <div class="kv num"><span>섹터 중간값 7일 / 30일</span><span>${f1(s.m7)} / ${f1(s.m30)}</span></div>
   <div class="kv num"><span>이평선 20 / 60 / 100 / 200</span><span>${px(c.ma20)} / ${px(c.ma60)} / ${px(c.ma100)} / ${px(c.ma200)}</span></div>
+  <div class="kv num"><span>RSI(14) · 거래소 나이</span><span>${c.rsi==null?"—":c.rsi.toFixed(0)}${c.dip?" · 과매도 눌림":""} · ${c.age==null?"210일+":c.age+"일"}</span></div>
   <div class="kv num"><span>거래량</span><span>${usd(c.vol)} · 최근 3일 ${c.vx==null?"—":c.vx.toFixed(1)+"배"}</span></div>
   <div class="kv num"><span>상장 (상위 20개 거래소)</span><span>${c.ex20==null?"—":c.ex20+"곳"}</span></div>
   <div class="kv num"><span>구매 고려 점수</span><span><b>${c.score.toFixed(0)}</b></span></div>

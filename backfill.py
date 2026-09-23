@@ -59,6 +59,27 @@ def pct(a, b):
     return None if a is None or not b else (a - b) / b * 100
 
 
+def rsi_series(p, n=14):
+    """날마다의 Wilder RSI (빠진 날은 직전 값으로 채움)"""
+    out, last, ag, al, k = [None] * len(p), None, 0.0, 0.0, 0
+    for i, x in enumerate(p):
+        if x is None:
+            x = last
+        if x is None or last is None:
+            last = x
+            continue
+        g, lo = max(x - last, 0), max(last - x, 0)
+        k += 1
+        if k <= n:
+            ag, al = ag + g / n, al + lo / n
+        else:
+            ag, al = (ag * (n - 1) + g) / n, (al * (n - 1) + lo) / n
+        if k >= n:
+            out[i] = 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+        last = x
+    return out
+
+
 def summ(rows):
     x7 = [r["x7"] for r in rows if r.get("x7") is not None]
     x30 = [r["x30"] for r in rows if r.get("x30") is not None]
@@ -85,7 +106,7 @@ def backtest(members, hist):
         for d, a, b, c in zip(h["d"], h["p"], h["m"], h["v"]):
             if d in idx:
                 p[idx[d]], mc[idx[d]], v[idx[d]] = a, b, c
-        A[cid] = {"p": p, "m": mc, "v": v}
+        A[cid] = {"p": p, "m": mc, "v": v, "rsi": rsi_series(p)}
     secs = {s["key"]: s for s in m.SECTORS}
     coin_secs = {}
     for k, ids in members.items():
@@ -108,7 +129,7 @@ def backtest(members, hist):
     def win(xs, a, b):
         return [x for x in xs[a:b] if x]
 
-    T = {k: [] for k in ("top", "early", "small", "pull", "reclaim_turn", "reclaim_bounce", "lead", "tp")}
+    T = {k: [] for k in ("top", "early", "small", "pull", "reclaim_turn", "reclaim_bounce", "rsi_dip", "lead", "tp", "fall", "rsi_hot")}
     X = {k: [] for k in ("z10", "score", "rs", "nocap")}
     ALT = {"25 이하": [], "25~50": [], "50~75": [], "75 이상": []}
     BYS = {}
@@ -150,6 +171,10 @@ def backtest(members, hist):
                 if not tp and r["run"] >= TH["tp_run"] and r["offpk"] >= TH["tp_near"]:
                     tp = "run"
                 r["tp"] = tp
+                r["fall"] = r["run"] >= TH["brk_run"] and r["offpk"] <= TH["brk_off"] and not tp
+                r["rsi"] = A[cid]["rsi"][i]
+                trend = r["ma200"] or r["ma100"] or r["ma60"]
+                r["dip"] = r["rsi"] is not None and TH["rsi_dip_lo"] <= r["rsi"] <= TH["rsi_dip_hi"] and bool(trend) and p[i] > trend
                 below = 0
                 for k in range(1, 15):
                     j = i - k
@@ -249,6 +274,12 @@ def backtest(members, hist):
                         T["reclaim_turn" if (r["ma60"] and r["px"] > r["ma60"]) else "reclaim_bounce"])
                 if r["tp"]:
                     rec("tp", r, T["tp"])
+                if r["fall"]:
+                    rec("fall", r, T["fall"])
+                if r["rsi"] is not None and r["rsi"] >= TH["rsi_hot"]:
+                    rec("rsi_hot", r, T["rsi_hot"])
+                if r["dip"]:
+                    rec("rsi_dip", r, T["rsi_dip"])
             for s in S.values():
                 if s["top"]:
                     lead = max([r for r in s["ms"] if "sec" in r and r["sec"] == s["k"]] or [None], key=lambda r: r["c30"] if r else 0)
