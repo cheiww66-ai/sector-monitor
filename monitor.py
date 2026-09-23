@@ -21,12 +21,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "4.0"
+VERSION = "4.1"
 RELEASED = "2026-09-24"
 CREDIT = "Made by Tyler"
 SUBTITLE = "Project Charon for Team All Street"
 VERSION_RULE = "큰 업데이트(x.0)는 코인을 고르는 규칙이 바뀐 것, 작은 업데이트(x.1)는 화면·표시만 바뀐 것입니다. 실전 성적은 큰 버전별로 따로 집계합니다."
 CHANGELOG = [
+    ("4.1", "2026-09-24", "작은 업데이트", [
+        "순환 탭을 섹터 탭으로 합침: PC는 섹터 목록 옆에 RRG 그래프 고정, 모바일은 그래프를 접었다 펴기",
+        "RRG 정리: 꼬리는 순환 후보·선택한 섹터만, 축 설명은 그래프 밖으로, 섹터를 누르면 그래프와 목록이 서로 따라감",
+        "섹터 정렬: 상태·3.0 점수 제거, 3일(단기)·7일·30일·시총. 순환 후보는 항상 맨 위에 고정",
+        "코인 순서 버튼을 섹터 안으로 옮기고, 주요 조작 버튼에 색 구분",
+        "보라색(순환 후보)과 4상태 색의 뜻을 목록 위에 설명",
+        "시장 탭: 알트 유리 표기를 '조건 3개 중 몇 개'로, 섹터 순환 추이 차트(1개월·6개월), 체급별 수익률 7일·30일·90일 전환 + 체급 지수 차트",
+    ]),
     ("4.0", "2026-09-24", "큰 업데이트", [
         "섹터를 4상태로 구분 (RRG): 주도(돈 들어옴)·둔화(빠지는 중)·소외(안 들어옴)·개선(들어오기 시작). 순환 탭에 RRG 차트",
         "순환 후보 섹터: 개선 상태(또는 막 주도로 넘어간 섹터) + 30일 아직 덜 오름 + 확인 신호 2개 이상 (거래량 증가·폭 개선·대형주 먼저·3일 시장보다 강함)",
@@ -1243,9 +1251,31 @@ def market_view(W, markets, candles, glob_hist, btc_cd):
                 m.append(statistics.median(r))
         return statistics.pstdev(m) if len(m) >= 5 else None
     now_d = statistics.pstdev([s["m7"] for s in W["secs"].values()]) if len(W["secs"]) >= 5 else None
-    hist_d = [x for x in (disp_at(k) for k in range(0, 30)) if x is not None]
-    disp = {"now": now_d, "norm": med(hist_d) if hist_d else None}
-    return {"btc": btc, "tiers": tiers, "lead": lead, "cyc": cyc, "disp": disp}
+    bd = (btc_cd or {}).get("d") or []
+    ser = [(bd[-1 - k] if k < len(bd) else None, disp_at(k)) for k in range(0, 180)]   # 날짜별 섹터 순환 (최근 180일)
+    ser = [(d, x) for d, x in reversed(ser) if d and x is not None]
+    hist_d = [x for _, x in ser[-30:]]
+    norm180 = med([x for _, x in ser]) if ser else None
+    disp = {"now": now_d, "norm": med(hist_d) if hist_d else None, "norm180": norm180,
+            "ser": [[d[5:], round(x, 2)] for d, x in ser]}
+    # 체급별 지수 (추적 코인, 최근 180일 마감 봉 + 현재가, 하루 수익률 중간값을 이어 붙임) → 7·30·90일 차트
+    days = bd[-180:]
+    tser = {"d": [d[5:] for d in days] + ["지금"], "s": []}
+    if len(days) >= 30:
+        for nm, rg, lo, hi in TIERS:
+            ids = [i for i, c in coins.items() if lo <= c["mc"] < hi and i in candles]
+            cols = []
+            for i in ids:
+                m = dict(zip(candles[i].get("d") or [], candles[i].get("c") or []))
+                cols.append([m.get(d) for d in days] + [coins[i]["px"]])
+            if len(cols) >= 3:
+                tser["s"].append({"n": nm, "cnt": len(cols), "v": [round(x, 3) if x else None for x in chain_index(cols)]})
+        if b.get("px"):
+            m = dict(zip(bd, btc_cd["c"]))
+            bv = [m.get(d) for d in days] + [b["px"]]
+            b0 = next((x for x in bv if x), None)
+            tser["s"].append({"n": "BTC", "cnt": 1, "v": [round(x / b0 * 100, 3) if x and b0 else None for x in bv]})
+    return {"btc": btc, "tiers": tiers, "lead": lead, "cyc": cyc, "disp": disp, "tser": tser}
 
 
 # ═════════════════════════ 실전 기록 ═════════════════════════
@@ -1373,7 +1403,7 @@ def slim(c):
 def render(D):
     data = json.dumps(D, ensure_ascii=False, separators=(",", ":"), default=lambda o: None).replace("</", "<\\/")
     sections = "".join(f'<section role="tabpanel" id="p-{k}"{"" if k == "home" else " hidden"}></section>'
-                       for k in ["home", "rot", "early", "small", "pull", "list", "sec", "mkt", "bt", "chk"])
+                       for k in ["home", "sec", "early", "small", "pull", "list", "mkt", "bt", "chk"])
     invite = (f'<a class="tg" href="{html.escape(TG_INVITE)}" target="_blank" rel="noopener">텔레그램 알림방 입장</a>' if TG_INVITE else "")
     return f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="color-scheme" content="dark">
@@ -1773,7 +1803,47 @@ td .chips{margin-top:3px;max-width:340px;white-space:normal}
 .pc .t{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
 .state{font-size:.78rem;font-weight:600;padding:1px 7px;border-radius:4px}
 .state.hold{color:var(--info);background:var(--info-bg)}.state.lost{color:var(--down);background:var(--bg3)}.state.turn{color:var(--accent);background:var(--accent-bg)}.state.bounce{color:var(--amber);background:var(--amber-bg)}
-/* 섹터 */
+/* 섹터 4.1 */
+.wrap.wide{max-width:1280px}
+.legend{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:0 0 12px;background:var(--bg2)}
+.lg-main{display:flex;gap:10px;align-items:flex-start;font-size:.88rem}
+.rotmark{flex:none;width:16px;height:16px;border-radius:50%;border:2.5px solid var(--accent);margin-top:2px}
+.lg-q{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:8px;font-size:.82rem;color:var(--muted)}
+.lg-q i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.secgrid{display:grid;gap:16px;grid-template-columns:1fr}
+.rrgcol{display:none}
+@media (min-width:1000px){.secgrid{grid-template-columns:minmax(0,1fr) 540px}.rrgcol{display:block}details.rrgm{display:none}}
+.rrgstick{position:sticky;top:108px}.rrgstick h3{margin:0}
+details.rrgm{margin:0 0 10px;border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+details.rrgm>summary{cursor:pointer;color:var(--accent);font-weight:600;font-size:.9rem}
+details.rrgm[open]>summary{margin-bottom:8px}
+.ctl.main{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:8px 10px;gap:8px 8px}
+.ctl .lab{font-weight:650;color:var(--text);font-size:.82rem}
+.ctl.main .seg button[aria-pressed="true"]{background:var(--accent);color:#fff}
+.ctl.sub{margin:10px 0 6px}.ctl.sub .lab{color:var(--muted);font-weight:600}
+.seg.sm2 button{font-size:.76rem;padding:3px 8px}
+h3.gh{margin:16px 0 6px}
+details.sd{border:1px solid var(--line);border-left:4px solid var(--faint);border-radius:8px;margin:0 0 8px;background:var(--bg)}
+details.sd.sq-lead{border-left-color:var(--up)}details.sd.sq-weak{border-left-color:var(--amber)}details.sd.sq-lag{border-left-color:var(--down)}details.sd.sq-imp{border-left-color:var(--info)}
+details.sd.isrot{border-color:var(--accent);border-left-width:4px}
+details.sd.sel{background:var(--bg2)}
+details.sd>summary{padding:9px 12px}
+.sh{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.sh .nm{font-weight:700}
+.sh .cnt{margin-left:auto;font-size:.76rem;color:var(--faint)}
+.sv{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:3px;color:var(--muted)}.sv .mk{font-weight:700;color:var(--text)}
+.rotbadge{font-size:.72rem;font-weight:700;color:#fff;background:var(--accent);padding:1px 7px;border-radius:999px}
+.sbody{padding:0 12px 10px}
+.sbody .slist{margin:0;border-left:0;padding-left:0}
+.rinfo{margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:8px}
+.xbtn{margin-left:auto;border:0;background:var(--bg3);border-radius:6px;padding:2px 8px;cursor:pointer;font-size:.76rem}
+.lc{position:relative}.lc svg{display:block;width:100%;height:auto}
+.lc .tip{position:absolute;top:0;pointer-events:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 7px;font-size:.74rem;white-space:nowrap;display:none;z-index:2}
+.lc text{font-size:10.5px;fill:var(--faint)}.lc text.el{fill:var(--text)}
+.tgrid{display:grid;gap:14px;grid-template-columns:1fr}@media (min-width:760px){.tgrid{grid-template-columns:minmax(0,1fr) minmax(0,1.3fr)}}
+.tgrid .tier{grid-template-columns:118px 1fr 64px}
+details.sd[open]>summary .chips{display:none}
+.tdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:1px}
+.box .bh .seg{margin-left:auto}
 .sec{display:grid;grid-template-columns:28px 1fr;gap:0 8px;padding:9px 0;border-bottom:1px solid var(--line)}
 .sec .n{color:var(--faint);font-size:.82rem;padding-top:2px;text-align:right}
 .sec .h{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
@@ -2005,11 +2075,11 @@ function stageNow(){const S=stageScores(),fr=S.map(c=>c.filter(x=>x[1]).length/c
   return {S,fr,cur,nxt:cur+1<8&&fr[cur+1]>=.5?cur+1:null};}
 
 /* 탭 */
-const TABS=[["home","순위"],["rot","순환",()=>ROT.length],["early","추천",()=>TOP.filter(shown).length+EARLY.filter(shown).length],["small","소형 도전",()=>SMALL.filter(shown).length],
- ["pull","눌림목",()=>PULL.filter(shown).length+NEAR.filter(shown).length+RECL.filter(shown).length],["list","상장",()=>LISTC.filter(shown).length],["sec","섹터"],["mkt","시장"],["bt","성적표"],["chk","데이터 점검"]];
+const TABS=[["home","순위"],["sec","섹터",()=>ROT.length],["early","추천",()=>TOP.filter(shown).length+EARLY.filter(shown).length],["small","소형 도전",()=>SMALL.filter(shown).length],
+ ["pull","눌림목",()=>PULL.filter(shown).length+NEAR.filter(shown).length+RECL.filter(shown).length],["list","상장",()=>LISTC.filter(shown).length],["mkt","시장"],["bt","성적표"],["chk","데이터 점검"]];
 let cur="home";
 function renderTabs(){document.getElementById("tabs").innerHTML=TABS.map(([k,n,f])=>`<button role="tab" id="t-${k}" aria-controls="p-${k}" aria-selected="${k===cur}" data-tab="${k}">${n}${f?`<span class="c">${f()}</span>`:""}</button>`).join("");}
-function go(k){cur=k;for(const [t] of TABS)document.getElementById("p-"+t).hidden=t!==k;renderTabs();if(k==="rot")renderRot();const b=document.querySelector(".bar");if(window.scrollY>b.offsetTop)window.scrollTo({top:b.offsetTop});}
+function go(k){cur=k;for(const [t] of TABS)document.getElementById("p-"+t).hidden=t!==k;renderTabs();document.querySelector(".wrap").classList.toggle("wide",k==="sec");if(k==="sec")renderSec();const b=document.querySelector(".bar");if(window.scrollY>b.offsetTop)window.scrollTo({top:b.offsetTop});}
 document.getElementById("tabs").addEventListener("click",e=>{const b=e.target.closest("[data-tab]");if(b)go(b.dataset.tab);});
 function renderFilt(){const all=new Set([...TOP,...EARLY,...SMALL,...PULL,...RECL,...NEAR,...LISTC]);const hid=[...all].filter(c=>!shown(c)).length;
   document.getElementById("filt").innerHTML=`<span>현물 상장</span>`+EXS.map(([k,n])=>`<label><input type="checkbox" data-ex="${k}" ${EXON[k]?"checked":""}>${n}</label>`).join("")+`<span class="hid">${hid?`필터로 ${hid}개 숨김`:"체크한 곳 중 1곳 이상 상장"}</span>`;}
@@ -2115,108 +2185,119 @@ function renderList(){
 }
 
 
-/* 순환 (RRG) */
+/* 섹터 (4.1: 순환 탭 통합 · 목록 + RRG) */
 const CHAIN=new Set(["ETH","SOL","BNB","BASE","ARB","SUI","AVAX","TON","TRX","APT","HYPE","BTCE"]);
 const QORD=["imp","lead","weak","lag"];
-let rotF="all",rrgSel=null;
-function rrgSvg(list){
-  const cw=(document.getElementById("p-rot").clientWidth||document.querySelector(".wrap").clientWidth||600);
-  const W=Math.round(Math.max(320,Math.min(640,cw))),H=Math.round(W<500?W*1.05:W*.7),P=W<500?22:30,pts=list.flatMap(s=>s.tail||[]);
-  if(!pts.length)return '<div class="empty">일봉 기록이 부족해 RRG를 그릴 수 없습니다 (약 30일 필요).</div>';
+const MK3=D.mk.m3||0;
+let rrgOpen=false,rrgSel=null,rrgHov=null,secF="all",secSort="x3",secDir=-1,coinOrd="lag";const OPEN=new Set();
+const secOk=s=>({all:true,chain:CHAIN.has(s.k),narr:!CHAIN.has(s.k)})[secF];
+function rrgSvg(list,W){
+  const H=Math.round(W*(W<460?1.0:.86)),L=W<460?16:22,R=8,T=8,Bm=W<460?20:24,pts=list.flatMap(s=>s.tail||[]);
+  if(!pts.length)return '<div class="empty">일봉 기록이 부족해 그래프를 그릴 수 없습니다 (약 30일 필요).</div>';
   const hd=list.filter(s=>s.tail&&s.tail.length).map(s=>s.tail[s.tail.length-1]);
-  const pq=(a,f)=>{const v=a.map(f).sort((x,y)=>x-y);return v[Math.floor((v.length-1)*.9)]||0;};
-  const dx=Math.max(1.5,...hd.map(p=>Math.abs(p[0]-100)),pq(pts,p=>Math.abs(p[0]-100)))*1.18,dy=Math.max(1.5,...hd.map(p=>Math.abs(p[1]-100)),pq(pts,p=>Math.abs(p[1]-100)))*1.18;
-  const X=v=>P+(v-100+dx)/(2*dx)*(W-2*P),Y=v=>H-P-(v-100+dy)/(2*dy)*(H-2*P),cx=X(100),cy=Y(100);
+  const focus=list.filter(s=>s.rotc||s.k===rrgSel||s.k===rrgHov).flatMap(s=>s.tail||[]);
+  const ext=(f)=>Math.max(1.2,...hd.map(f),...focus.map(f))*1.15;
+  const dx=ext(p=>Math.abs(p[0]-100)),dy=ext(p=>Math.abs(p[1]-100));
+  const X=v=>L+(v-100+dx)/(2*dx)*(W-L-R),Y=v=>T+(1-(v-100+dy)/(2*dy))*(H-T-Bm),cx=X(100),cy=Y(100);
   const q=(x,y,w,h,k)=>`<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${QC[k]}" opacity=".07"/>`;
-  let g=`<defs><clipPath id="rrgclip"><rect x="${P}" y="${P}" width="${W-2*P}" height="${H-2*P}"/></clipPath></defs>`+q(P,P,cx-P,cy-P,"imp")+q(cx,P,W-P-cx,cy-P,"lead")+q(cx,cy,W-P-cx,H-P-cy,"weak")+q(P,cy,cx-P,H-P-cy,"lag");
-  g+=`<line x1="${P}" x2="${W-P}" y1="${cy}" y2="${cy}" stroke="var(--faint)" stroke-width="1"/><line x1="${cx}" x2="${cx}" y1="${P}" y2="${H-P}" stroke="var(--faint)" stroke-width="1"/>`;
+  let g=`<defs><clipPath id="rrgclip"><rect x="${L}" y="${T}" width="${W-L-R}" height="${H-T-Bm}"/></clipPath></defs>`
+   +q(L,T,cx-L,cy-T,"imp")+q(cx,T,W-R-cx,cy-T,"lead")+q(cx,cy,W-R-cx,H-Bm-cy,"weak")+q(L,cy,cx-L,H-Bm-cy,"lag")
+   +`<line x1="${L}" x2="${W-R}" y1="${cy}" y2="${cy}" stroke="var(--line)"/><line x1="${cx}" x2="${cx}" y1="${T}" y2="${H-Bm}" stroke="var(--line)"/>`;
   const cl=(t,x,y,a,k)=>`<text x="${x}" y="${y}" text-anchor="${a}" class="rq" fill="${QC[k]}">${t}</text>`;
-  const sm=W<500;
-  g+=cl(sm?"개선":"개선 · 들어오기 시작",P+6,P+16,"start","imp")+cl(sm?"주도":"주도 · 돈 들어옴",W-P-6,P+16,"end","lead")+cl(sm?"둔화":"둔화 · 빠지는 중",W-P-6,H-P-8,"end","weak")+cl(sm?"소외":"소외 · 안 들어옴",P+6,H-P-8,"start","lag");
-  g+=`<text x="${W-P}" y="${cy-5}" text-anchor="end" class="ra">${sm?"시장보다 강함 →":"상대강도 → 시장보다 강함"}</text><text x="${cx+5}" y="${P-7}" class="ra">↑ 강해지는 중</text>`;
-  const boxes=[];
-  const place=(x,y,w)=>{for(const [ox,oy,a] of [[9,4,"start"],[9,-9,"start"],[9,16,"start"],[-9,4,"end"],[-9,-9,"end"],[-9,16,"end"]]){
-    const l=a==="start"?x+ox:x+ox-w,t=y+oy-10;if(l<2||l+w>W-2)continue;
+  g+=cl("개선",L+6,T+15,"start","imp")+cl("주도",W-R-6,T+15,"end","lead")+cl("둔화",W-R-6,H-Bm-7,"end","weak")+cl("소외",L+6,H-Bm-7,"start","lag");
+  g+=`<text x="${(L+W-R)/2}" y="${H-5}" text-anchor="middle" class="ra">← 시장보다 약함 · 상대강도 · 시장보다 강함 →</text>`
+   +`<text transform="translate(${L-6} ${(T+H-Bm)/2}) rotate(-90)" text-anchor="middle" class="ra">← 약해지는 중 · 모멘텀 · 강해지는 중 →</text>`;
+  const boxes=[],heads=[];
+  const place=(x,y,w)=>{for(const [ox,oy,a] of [[8,4,"start"],[-8,4,"end"],[8,-8,"start"],[8,15,"start"],[-8,-8,"end"],[-8,15,"end"]]){
+    const l=a==="start"?x+ox:x+ox-w,t=y+oy-10;if(l<L||l+w>W-R||t<T||t+12>H-Bm)continue;
     if(!boxes.some(b=>l<b[0]+b[2]&&l+w>b[0]&&t<b[1]+12&&t+12>b[1])){boxes.push([l,t,w]);return [x+ox,y+oy,a];}}return null;};
-  const heads=[];
-  for(const s of list){const t=s.tail||[];if(!t.length)continue;const col=QC[s.q]||"var(--faint)";const h=t[t.length-1],hx=X(h[0]),hy=Y(h[1]);
-    const sel=rrgSel===s.k,op=sel?.95:s.rotc?.75:rrgSel?.15:.35;
-    g+=`<g clip-path="url(#rrgclip)" class="rg${sel?" sel":""}" data-rrg="${s.k}" tabindex="0" role="button" aria-label="${esc(s.n)} ${QN[s.q]||""}"><title>${esc(s.n)} · ${QN[s.q]||"—"} ${s.qd}일째 · 상대강도 ${s.rsr?.toFixed(1)} · 모멘텀 ${s.rsm?.toFixed(1)}</title>
-    <polyline points="${t.map(p=>X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1)).join(" ")}" fill="none" stroke="${col}" stroke-width="2" stroke-linejoin="round" opacity="${op}"/>
-    ${t.slice(0,-1).map(p=>`<circle cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="2.2" fill="${col}" opacity="${op}"/>`).join("")}
-    ${s.rotc?`<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="10" fill="none" stroke="var(--accent)" stroke-width="2"/>`:""}
-    <circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="16" fill="transparent"/><circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="5.5" fill="${col}" stroke="var(--bg)" stroke-width="2"/></g>`;
-    heads.push([s,hx,hy]);}
-  for(const [s,hx,hy] of heads.sort((a,b)=>(b[0].rotc-a[0].rotc)||(b[0].mc-a[0].mc))){const w=s.n.length*11+4,p=place(hx,hy,w);
-    if(p)g+=`<text x="${p[0].toFixed(1)}" y="${p[1].toFixed(1)}" text-anchor="${p[2]}" class="rl${s.rotc?" rc":""}" data-rrg="${s.k}">${esc(s.n)}</text>`;}
-  return `<svg class="rrg" viewBox="0 0 ${W} ${H}" role="img" aria-label="섹터 RRG: 가로 상대강도, 세로 모멘텀">${g}</svg>`;
+  const tailOn=s=>s.rotc||s.k===rrgSel||s.k===rrgHov;
+  const dimAll=rrgSel||rrgHov;
+  for(const s of [...list].sort((a,b)=>tailOn(a)-tailOn(b))){const t=s.tail||[];if(!t.length)continue;const col=QC[s.q]||"var(--faint)";
+    const h=t[t.length-1],hx=X(h[0]).toFixed(1),hy=Y(h[1]).toFixed(1),on=tailOn(s),hi=s.k===rrgSel||s.k===rrgHov;
+    heads.push([s,+hx,+hy]);boxes.push([+hx-6,+hy-6-4,12]);
+    g+=`<g class="rg" data-rrg="${s.k}" opacity="${dimAll&&!hi&&!s.rotc?.35:1}"><title>${esc(s.n)} · ${QN[s.q]||"—"} ${s.qd}일째</title>
+    ${on?`<polyline clip-path="url(#rrgclip)" points="${t.map(p=>X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1)).join(" ")}" fill="none" stroke="${col}" stroke-width="${hi?3:2}" stroke-linejoin="round" stroke-linecap="round" opacity=".85"/>
+    ${t.slice(0,-1).map((p,i)=>`<circle clip-path="url(#rrgclip)" cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="${1.6+i*.3}" fill="${col}" opacity=".7"/>`).join("")}`:""}
+    ${s.rotc?`<circle cx="${hx}" cy="${hy}" r="10" fill="none" stroke="var(--accent)" stroke-width="2.2"/>`:""}
+    <circle cx="${hx}" cy="${hy}" r="15" fill="transparent"/><circle cx="${hx}" cy="${hy}" r="${hi?7:5.5}" fill="${col}" stroke="var(--bg2)" stroke-width="2"/></g>`;}
+  for(const [s,hx,hy] of heads.sort((a,b)=>((b[0].k===rrgSel||b[0].k===rrgHov)-(a[0].k===rrgSel||a[0].k===rrgHov))||(b[0].rotc-a[0].rotc)||(b[0].mc-a[0].mc))){
+    const imp=s.rotc||s.k===rrgSel||s.k===rrgHov,w=s.n.length*(imp?12:10.5)+4,p=place(hx,hy,w);
+    if(p)g+=`<text x="${p[0].toFixed(1)}" y="${p[1].toFixed(1)}" text-anchor="${p[2]}" class="rl${imp?" rc":""}" data-rrg="${s.k}">${esc(s.n)}</text>`;}
+  return `<svg class="rrg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="섹터 RRG: 가로 상대강도, 세로 모멘텀">${g}</svg>`;
 }
-function rrgInfo(){
-  const s=SX[rrgSel];if(!s)return `<p class="sm na" style="margin:6px 0 0">점을 누르면 섹터 설명 · 꼬리 = 최근 ${TH.rrg_tail*TH.rrg_step-TH.rrg_step}일 (${TH.rrg_step}일 간격), 큰 점이 지금 · <span style="color:var(--accent)">○</span> 순환 후보</p>`;
-  return `<div class="box" style="margin-top:8px"><div class="bh"><b>${esc(s.n)}</b>${qChip(s)}<span class="sm na">${s.qd}일째${s.qp?` · 직전 ${QN[s.qp]}`:""}</span>${s.rotc?chip("순환 후보","hot"):""}</div>
-  <div class="sm num">상대강도 ${s.rsr==null?"—":s.rsr.toFixed(1)} · 모멘텀 ${s.rsm==null?"—":s.rsm.toFixed(1)} · 30일 시장 대비 <span class="${cls(s.x30)}">${f1(s.x30,0)}p</span></div>
-  <div class="chips">${(s.conf||[]).map(([t,ok,v])=>chip(`${ok?"✓":"✕"} ${t} · ${v}`,ok?"ok":"")).join("")}</div>
-  <div class="chips" style="margin-top:6px"><button class="tvb" data-gosec="${s.k}">섹터 코인 보기</button></div></div>`;
+const LEGEND=`<div class="legend">
+ <div class="lg-main"><span class="rotmark"></span><div><b>보라 테두리 = 순환 후보</b> · 돈이 들어오기 시작한 섹터 중 확인 신호 ${TH.rot_conf}개 이상, 30일 아직 덜 오름. <b>추천 Top 3는 여기서만 뽑습니다.</b></div></div>
+ <div class="lg-q">${QORD.map(k=>`<span><i style="background:${QC[k]}"></i><b style="color:${QC[k]}">${QN[k]}</b> ${QD[k]}</span>`).join("")}</div>
+ <p class="sm na" style="margin:4px 0 0">섹터는 보통 개선 → 주도 → 둔화 → 소외 → 개선 순으로 시계 방향으로 돕니다. 그래프 오른쪽 = 시장보다 강함, 위쪽 = 점점 강해지는 중.</p></div>`;
+const WIDE=()=>window.matchMedia("(min-width:1000px)").matches;
+function chartBox(){
+  const host=document.getElementById(WIDE()?"rrgbox":"rrgbox-m");if(!host)return;
+  if(!WIDE()&&!host.closest("details").open)return;
+  const list=D.secs.filter(s=>s.q&&secOk(s));
+  const W=Math.round(Math.max(300,Math.min(560,host.clientWidth||520)));
+  const s=SX[rrgSel];
+  host.innerHTML=rrgSvg(list,W)+(s?`<div class="rinfo"><div class="bh"><b>${esc(s.n)}</b>${qChip(s)}<span class="sm na">${s.qd}일째${s.qp?` · 직전 ${QN[s.qp]}`:""}</span>${s.rotc?'<span class="chip hot">순환 후보</span>':""}<button class="xbtn" data-rrg-clear>선택 해제</button></div>
+   <div class="sm num">상대강도 ${s.rsr==null?"—":s.rsr.toFixed(1)} · 모멘텀 ${s.rsm==null?"—":s.rsm.toFixed(1)} (100 = 시장 평균)</div></div>`
+   :`<p class="sm na" style="margin:6px 2px 0">점·목록을 누르면 선택 · 꼬리 = 최근 ${TH.rrg_tail*TH.rrg_step-TH.rrg_step}일 이동 (순환 후보·선택한 섹터만) · <span style="color:var(--accent)">○</span> 순환 후보</p>`);
 }
-function rotCard(s){
-  const cs=s.ids.map(i=>CM[i]).filter(c=>c&&!c.fatal&&shown(c));
-  const picks=cs.filter(c=>c.topRank||EARLY.includes(c)).sort((a,b)=>(a.topRank||9)-(b.topRank||9)||b.score-a.score).slice(0,5);
-  const big=[...cs].sort((a,b)=>b.mc-a.mc).slice(0,4);
-  return `<div class="box rotc"><div class="bh"><h3>${esc(s.n)}</h3>${qChip(s)}<span class="sm na">${s.qd}일째${s.qp?` · 직전 ${QN[s.qp]}`:""}</span></div>
-  <div class="sm num">30일 시장 대비 <span class="${cls(s.x30)}">${f1(s.x30,0)}p</span> · 7일 <span class="${cls(s.x7)}">${f1(s.x7)}p</span> · 확인 <b>${s.nconf}/4</b></div>
-  <div class="chips">${s.conf.map(([t,ok,v])=>chip(`${ok?"✓":"✕"} ${t} · ${v}`,ok?"ok":"")).join("")}</div>
-  <h4>${picks.length?"이 섹터 추천·후보":"시총 상위 (추천 조건 미통과)"}</h4>
-  <div class="slist" style="margin:0;border:0;padding:0">${(picks.length?picks:big).map(c=>`<div class="r" data-coin="${c.id}"><b>${esc(c.s)}${c.topRank?` <span class="chip hot">Top ${c.topRank}</span>`:""}</b>${spark(c,64,18)}<span class="g num"><span class="${cls(c.c7)}">7일 ${f1(c.c7)}</span><span class="${cls(c.c30)}">30일 ${f1(c.c30)}</span>${tvBtn(c)}</span></div>`).join("")||'<p class="sm na">표시할 코인 없음 (거래소 필터 확인)</p>'}</div>
-  <div class="chips" style="margin-top:6px"><button class="tvb" data-rrgsel="${s.k}">RRG에서 보기</button><button class="tvb" data-gosec="${s.k}">섹터 전체</button></div></div>`;
+function secRow(s){
+  const cs=s.ids.map(i=>CM[i]).filter(Boolean);const nat=new Set(s.native||[]);
+  const o={lag:(a,b)=>a.c30-b.c30,now:(a,b)=>(b.c3??-999)-(a.c3??-999),mc:(a,b)=>b.mc-a.mc}[coinOrd];
+  const x3=s.m3-MK3,met=(k,t,v,d=1)=>`<span class="${secSort===k?"mk":""}">${t} <span class="${cls(v)}">${f1(v,d)}p</span></span>`;
+  const sel=rrgSel===s.k;
+  return `<details class="sd sq-${s.q||"na"}${s.rotc?" isrot":""}${sel?" sel":""}" data-k="${s.k}" ${OPEN.has(s.k)?"open":""}><summary data-pick="${s.k}">
+   <div class="sh"><span class="nm">${esc(s.n)}</span>${qChip(s)}${s.rotc?'<span class="rotbadge">순환 후보</span>':""}${s.watch?chip("관찰 섹터"):""}${s.thin&&!s.watch?chip("코인 수 부족"):""}<span class="cnt">${cs.length}개 ▾</span></div>
+   <div class="sm num sv">${met("x3","3일",x3)}${met("x7","7일",s.x7)}${met("x30","30일",s.x30,0)}${secSort==="mc"?`<span class="mk">시총 ${big$(s.mc)}</span>`:""}<span class="na">시장 대비</span></div>
+   ${s.rotc||s.rot?`<div class="chips">${s.conf.map(([t,ok,v])=>chip(`${ok?"✓":"✕"} ${t}`,ok?"ok":"")).join("")}</div>`:""}</summary>
+   <div class="sbody"><div class="chips">${s.conf.map(([t,ok,v])=>chip(`${ok?"✓":"✕"} ${t} · ${v}`,ok?"ok":"")).join("")}${s.lead?chip(`대장 ${s.lead.s} ${f1(s.lead.c30,0)}`,"hot"):""}${nat.size?chip(`혼합 섹터: 네이티브 ${nat.size}개`,"warn"):""}</div>
+   <div class="ctl sub"><span class="lab">코인 순서</span><span class="seg sm2">${[["lag","덜 오른 순"],["now","지금 오르는 순"],["mc","시총 순"]].map(([k,t])=>`<button data-co="${k}" aria-pressed="${coinOrd===k}">${t}</button>`).join("")}</span></div>
+   <div class="slist">${[...cs].sort(o).map(c=>`<div class="r" data-coin="${c.id}"><b>${esc(c.s)}${c.topRank?` <span class="chip hot">Top ${c.topRank}</span>`:""}${s.lead&&s.lead.id===c.id?' <span class="chip">대장</span>':""}${nat.has(c.id)?' <span class="chip">네이티브</span>':""}</b>${spark(c,64,18)}<span class="g num"><span class="${cls(c.c3)}">3일 ${f1(c.c3)}</span><span class="${cls(c.c30)}">30일 ${f1(c.c30)}</span>${tvBtn(c)}</span></div>`).join("")}</div></div></details>`;
 }
-function renderRot(){
-  const all=D.secs.filter(s=>s.q);
-  const flt={all:()=>true,rot:s=>s.q==="imp"||s.q==="lead",chain:s=>CHAIN.has(s.k),narr:s=>!CHAIN.has(s.k)}[rotF];
-  const list=all.filter(flt);
-  const near=D.secs.filter(s=>s.rot&&!s.rotc&&!s.watch).map(s=>{const why=s.thin?"코인 수 부족":s.x30>TH.rot_x30?`30일 이미 +${s.x30.toFixed(0)}%p`:s.nconf<TH.rot_conf?`확인 ${s.nconf}/4`:"5개 제한";return [s,why];});
-  const seg=`<span class="seg">${[["all","전체"],["rot","개선·주도만"],["chain","체인"],["narr","내러티브"]].map(([k,t])=>`<button data-rf="${k}" aria-pressed="${rotF===k}">${t}</button>`).join("")}</span>`;
-  document.getElementById("p-rot").innerHTML=`<p class="lead">섹터 지수를 시장 지수(추적 코인 ${D.mk.n}개 중간값)와 비교합니다. <b>오른쪽</b> = 시장보다 강함, <b>위쪽</b> = 점점 강해지는 중. 섹터는 보통 <b>개선 → 주도 → 둔화 → 소외 → 개선</b> 순으로 시계 방향으로 돕니다. 돈이 들어오기 시작한 <b>개선</b> 섹터가 순환 후보입니다.</p>
-  <div class="ctl">표시 ${seg}</div>${rrgSvg(list)}<div id="rrginfo">${rrgInfo()}</div>
-  <h3>순환 후보 섹터 <span class="sm na">${ROT.length}개 · Top 3를 여기서 뽑음</span></h3>
-  ${ROT.length?`<div class="grid2">${ROT.map(rotCard).join("")}</div>`:'<div class="empty">지금은 조건을 모두 채운 섹터가 없습니다. 억지로 찾지 않는 것이 정상입니다.</div>'}
-  ${near.length?`<h3>개선 중이지만 조건 미달 <span class="sm na">관찰</span></h3><div class="chips">${near.map(([s,w])=>`<span class="chip" data-gosec="${s.k}" style="cursor:pointer">${esc(s.n)} · ${QN[s.q]} · ${esc(w)}</span>`).join("")}</div>`:""}
-  <h3>섹터 4상태</h3><div class="qtab">${QORD.map(k=>{const ss=D.secs.filter(s=>s.q===k).sort((a,b)=>b.rsm-a.rsm);
-    return `<div class="qrow"><span class="qchip q-${k}">${QN[k]}<span class="na"> · ${QD[k]}</span></span><div class="chips" style="margin:0">${ss.map(s=>`<span class="chip${s.rotc?" hot":""}" data-rrgsel="${s.k}" style="cursor:pointer">${esc(s.n)} <span class="na">${s.qd}일</span></span>`).join("")||'<span class="sm na">없음</span>'}</div></div>`;}).join("")}</div>
-  <details class="rule"><summary>판정 방식</summary><ul>
-  <li>섹터 지수·시장 지수: 마감 일봉 + 현재가로, 코인들의 하루 수익률 중간값을 이어 붙임 (한두 코인 급등에 덜 흔들림)</li>
-  <li>상대강도 = 섹터 ÷ 시장 (3일 평활)을 20일 평균과 비교, 100 = 평균 · 모멘텀 = 상대강도의 ${TH.rrg_k}일 변화 + 100. RRG 원 공식은 공개되지 않아 근사식입니다</li>
-  <li>순환 후보: ① 개선 상태, 또는 개선에서 주도로 넘어간 지 ${TH.rot_fresh}일 이내 ② 30일 시장 대비 +${TH.rot_x30}%p 이하 (이미 많이 오른 섹터 제외) ③ 확인 신호 ${TH.rot_conf}개 이상 ④ 코인 ${TH.sec_min}개 이상, 관찰 섹터 아님. 점수 순 ${TH.rot_max}개까지</li>
-  <li>확인 신호: 거래량 증가 (섹터 코인 중간값 최근 3일 ÷ 이전 20일 ${TH.rot_vol}배↑) · 폭 개선 (20일선 위 코인 ${TH.rot_br}%↑이면서 1주 새 +${TH.rot_brd}%p↑) · 대형주 먼저 (시총 1·2위 모두 20일선 위) · 3일 수익률이 시장보다 강함</li>
-  <li>소외 섹터를 바로 사지 않는 이유: 소외는 '싸다'가 아니라 '돈이 빠지는 중'. 방향이 돌아선 개선부터 봅니다. 어느 상태가 실제로 나았는지는 성적표 → 섹터 상태별 성적에서 확인</li></ul></details>`;
-}
-let _rz=null,_rw=window.innerWidth;window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{if(Math.abs(window.innerWidth-_rw)>40){_rw=window.innerWidth;if(cur==="rot")renderRot();}},200);});
-document.getElementById("p-rot").addEventListener("click",e=>{
-  const f=e.target.closest("[data-rf]");if(f){rotF=f.dataset.rf;renderRot();return;}
-  const r=e.target.closest("[data-rrg],[data-rrgsel]");if(r){rrgSel=r.dataset.rrg||r.dataset.rrgsel;renderRot();if(r.dataset.rrgsel)document.querySelector("#p-rot .rrg").scrollIntoView({behavior:"smooth",block:"center"});}});
-document.addEventListener("click",e=>{const g=e.target.closest("[data-gosec]");if(g){const k=g.dataset.gosec;OPEN.add(k);go("sec");renderSec();const el=document.querySelector(`#p-sec details[data-k="${k}"]`);if(el)el.scrollIntoView({block:"start"});return;}
-  const r=e.target.closest("[data-gorot]");if(r){rrgSel=r.dataset.gorot;go("rot");renderRot();}});
-
-/* 섹터 */
-let secSort="q",secDir=-1,coinOrd="lag";const OPEN=new Set();
-document.getElementById("p-sec").addEventListener("toggle",e=>{const d=e.target;if(d.dataset&&d.dataset.k){d.open?OPEN.add(d.dataset.k):OPEN.delete(d.dataset.k);}},true);
 function renderSec(){
-  const key={q:s=>-(QORD.indexOf(s.q)<0?9:QORD.indexOf(s.q))*1000+(s.rotc?500:0)+(s.rsm||0),score:s=>s.score,x7:s=>s.x7,x30:s=>s.x30,mc:s=>s.mc}[secSort];
-  const rows=[...D.secs].sort((a,b)=>(key(a)-key(b))*secDir);
-  const mx=Math.max(...D.secs.map(s=>Math.abs(s.score)),1);
+  const key={x3:s=>s.m3-MK3,x7:s=>s.x7,x30:s=>s.x30,mc:s=>s.mc}[secSort];
+  const all=D.secs.filter(secOk);
+  const rot=all.filter(s=>s.rotc).sort((a,b)=>(key(a)-key(b))*secDir),rest=all.filter(s=>!s.rotc).sort((a,b)=>(key(a)-key(b))*secDir);
+  const near=all.filter(s=>s.rot&&!s.rotc&&!s.watch);
   const seg=(cur,items,attr)=>`<span class="seg">${items.map(([k,t])=>`<button data-${attr}="${k}" aria-pressed="${cur===k}">${t}</button>`).join("")}</span>`;
-  document.getElementById("p-sec").innerHTML=`<p class="sm na" style="margin:0 0 8px"><span class="tagtop">■ 보라</span> = 순환 후보 섹터 (Top 3를 뽑는 곳) · 상태는 순환 탭 참고 · 섹터를 누르면 코인 목록</p>
-  <div class="ctl">정렬 ${seg(secSort,[["q","상태"],["score","3.0 점수"],["x7","7일"],["x30","30일"],["mc","시총"]],"ss")}
-  <span class="seg"><button data-sd="-1" aria-pressed="${secDir===-1}">높은 순</button><button data-sd="1" aria-pressed="${secDir===1}">낮은 순</button></span>
-  코인 순서 ${seg(coinOrd,[["lag","덜 오른 순"],["now","지금 오르는 순"],["mc","시총 순"]],"co")}</div>
-  ${rows.map(s=>{const cs=s.ids.map(i=>CM[i]).filter(Boolean);const nat=new Set(s.native||[]);
-    const o={lag:(a,b)=>a.c30-b.c30,now:(a,b)=>(b.c3??-999)-(a.c3??-999),mc:(a,b)=>b.mc-a.mc}[coinOrd];
-    return `<details class="sd" data-k="${s.k}" ${OPEN.has(s.k)?"open":""}><summary><div class="sec ${s.rotc?"top":""}"><span class="n">${s.rank}</span><div><div class="h"><span class="nm">${esc(s.n)}</span>${qChip(s)}${s.rotc?'<span class="tagtop">순환 후보</span>':""}${s.watch?chip("관찰 섹터"):""}${s.thin&&!s.watch?chip("코인 수 부족"):""}<span class="sm num">7일 <span class="${cls(s.x7)}">${f1(s.x7)}p</span> · 30일 <span class="${cls(s.x30)}">${f1(s.x30,0)}p</span> · 상승 ${s.br.toFixed(0)}% · ${cs.length}개</span></div>
-    <div class="sbar"><i style="width:${Math.max(s.score,0)/mx*100}%"></i></div>
-    <div class="chips">${chip(`확인 ${s.nconf}/4`,s.nconf>=TH.rot_conf?"ok":"")}${chip(`시장보다 7일 ${f1(s.x7)}p`,s.x7>0?"ok":"")}${chip(`30일 ${f1(s.x30,0)}p`,s.x30>TH.rot_x30?"warn":"")}${chip(`상승 비율 ${s.br.toFixed(0)}%`)}${s.top?chip("3.0 상위 섹터"):""}${s.lead?chip(`대장 ${s.lead.s} ${f1(s.lead.c30,0)}`,"hot"):""}${nat.size?chip(`혼합 섹터: 네이티브 ${nat.size}개 + 참여 프로젝트`,"warn"):""}</div></div></div></summary>
-    <div class="slist">${[...cs].sort(o).map(c=>`<div class="r" data-coin="${c.id}"><b>${esc(c.s)}${s.lead&&s.lead.id===c.id?' <span class="chip hot">대장</span>':""}${nat.has(c.id)?' <span class="chip">네이티브</span>':""}</b>${spark(c,64,18)}<span class="g num"><span class="${cls(c.c3)}">3일 ${f1(c.c3)}</span><span class="${cls(c.c30)}">30일 ${f1(c.c30)}</span>${tvBtn(c)}</span></div>`).join("")}</div></details>`;}).join("")}`;
+  document.getElementById("p-sec").innerHTML=`${LEGEND}<div class="secgrid"><div class="seccol">
+   <details class="rrgm" ${rrgOpen?"open":""}><summary>RRG 그래프 ${rrgOpen?"접기":"보기"}</summary><div id="rrgbox-m"></div></details>
+   <div class="ctl main"><span class="lab">정렬</span>${seg(secSort,[["x3","3일"],["x7","7일"],["x30","30일"],["mc","시총"]],"ss")}${seg(String(secDir),[["-1","높은 순"],["1","낮은 순"]],"sd")}<span class="lab" style="margin-left:6px">보기</span>${seg(secF,[["all","전체"],["chain","체인"],["narr","내러티브"]],"sf")}</div>
+   <h3 class="gh" style="margin-top:10px">순환 후보 <span class="sm na">${rot.length}개 · 항상 맨 위</span></h3>
+   ${rot.map(secRow).join("")||'<div class="empty sm">지금은 조건을 모두 채운 섹터가 없습니다. 억지로 찾지 않는 것이 정상입니다.</div>'}
+   ${near.length?`<p class="sm na" style="margin:6px 0 0">개선 중이지만 조건 미달: ${near.map(s=>`<a href="#" data-pick="${s.k}">${esc(s.n)}</a> (${s.thin?"코인 수 부족":s.x30>TH.rot_x30?`30일 이미 +${s.x30.toFixed(0)}%p`:`확인 ${s.nconf}/4`})`).join(" · ")}</p>`:""}
+   <h3 class="gh">나머지 섹터 <span class="sm na">${rest.length}개</span></h3>${rest.map(secRow).join("")}
+   <details class="rule"><summary>판정 방식</summary><ul>
+   <li>섹터 지수·시장 지수: 마감 일봉 + 현재가로, 코인들의 하루 수익률 중간값을 이어 붙임 (한두 코인 급등에 덜 흔들림)</li>
+   <li>상대강도 = 섹터 ÷ 시장 (3일 평활)을 20일 평균과 비교, 100 = 평균 · 모멘텀 = 상대강도의 ${TH.rrg_k}일 변화 + 100. RRG 원 공식은 비공개라 근사식</li>
+   <li>순환 후보: ① 개선, 또는 개선→주도 ${TH.rot_fresh}일 이내 ② 30일 시장 대비 +${TH.rot_x30}%p 이하 ③ 확인 신호 ${TH.rot_conf}개↑ ④ 코인 ${TH.sec_min}개↑. ${TH.rot_max}개까지</li>
+   <li>확인 신호: 거래량 증가 (최근 3일 ÷ 이전 20일 ${TH.rot_vol}배↑) · 폭 개선 (20일선 위 ${TH.rot_br}%↑이면서 1주 새 +${TH.rot_brd}%p↑) · 대형주 먼저 (시총 1·2위 20일선 위) · 3일 시장보다 강함</li>
+   <li>3일·7일·30일 = 섹터 중간값 − 시장 중간값 (%p)</li>
+   <li>그래프는 폭 1000px 이상이면 목록 옆에 고정, 그보다 좁으면 목록 위에서 펼쳐 봄</li></ul></details>
+  </div><aside class="rrgcol"><div class="rrgstick"><div class="bh"><h3>섹터 순환 지도 (RRG)</h3></div><div id="rrgbox"></div></div></aside></div>`;
+  layoutChart();
 }
-document.getElementById("p-sec").addEventListener("click",e=>{const b=e.target.closest("button[data-ss],button[data-sd],button[data-co]");if(!b)return;
-  if(b.dataset.ss)secSort=b.dataset.ss;if(b.dataset.sd)secDir=+b.dataset.sd;if(b.dataset.co)coinOrd=b.dataset.co;renderSec();});
+function layoutChart(){chartBox();}
+const drawChart=chartBox;
+function pickSec(k,scroll){
+  rrgSel=rrgSel===k&&!scroll?null:k;
+  document.querySelectorAll("#p-sec details.sd").forEach(el=>el.classList.toggle("sel",el.dataset.k===rrgSel));
+  drawChart();
+  if(scroll&&rrgSel){const el=document.querySelector(`#p-sec details.sd[data-k="${k}"]`);if(el){el.open=true;OPEN.add(k);el.scrollIntoView({behavior:"smooth",block:"center"});}}
+}
+const P_SEC=document.getElementById("p-sec");
+P_SEC.addEventListener("toggle",e=>{const d=e.target;if(d.classList&&d.classList.contains("rrgm")){rrgOpen=d.open;d.querySelector("summary").textContent="RRG 그래프 "+(d.open?"접기":"보기");if(d.open)drawChart();return;}
+  if(d.dataset&&d.dataset.k){d.open?OPEN.add(d.dataset.k):OPEN.delete(d.dataset.k);if(d.open){rrgSel=d.dataset.k;document.querySelectorAll("#p-sec details.sd").forEach(el=>el.classList.toggle("sel",el.dataset.k===rrgSel));drawChart();}}},true);
+P_SEC.addEventListener("click",e=>{
+  const b=e.target.closest("button[data-ss],button[data-sd],button[data-co],button[data-sf]");
+  if(b){e.preventDefault();if(b.dataset.ss)secSort=b.dataset.ss;if(b.dataset.sd)secDir=+b.dataset.sd;if(b.dataset.co)coinOrd=b.dataset.co;if(b.dataset.sf)secF=b.dataset.sf;renderSec();return;}
+  if(e.target.closest("[data-rrg-clear]")){rrgSel=null;pickSec(null);return;}
+  const r=e.target.closest("[data-rrg]");if(r){pickSec(r.dataset.rrg,true);return;}
+  const a=e.target.closest("a[data-pick]");if(a){e.preventDefault();pickSec(a.dataset.pick,true);}});
+P_SEC.addEventListener("mouseover",e=>{if(!WIDE())return;const d=e.target.closest("details.sd");const k=d?d.dataset.k:null;if(k!==rrgHov){rrgHov=k;chartBox();}});
+P_SEC.addEventListener("mouseleave",()=>{if(rrgHov){rrgHov=null;chartBox();}});
+let _rz=null,_rw=window.innerWidth;window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{if(Math.abs(window.innerWidth-_rw)>40){_rw=window.innerWidth;if(cur==="sec")renderSec();}},200);});
+document.addEventListener("click",e=>{const g=e.target.closest("[data-gosec],[data-gorot]");if(!g)return;const k=g.dataset.gosec||g.dataset.gorot;go("sec");pickSec(k,true);});
 
 /* 시장 */
 let brOpen=null;
@@ -2225,13 +2306,72 @@ const BRF=[[c=>c.c7>0,c=>c.c7,"7일"],[c=>c.c30>0,c=>c.c30,"30일"],[c=>c.run!=n
 function breadthList(i){const [f,v,lab]=BRF[i];const L=C.filter(c=>f(c)&&shown(c)).sort((a,b)=>(i===5?v(a)-v(b):v(b)-v(a)));
   return `<p class="sm na">${L.length}개 · ${lab} 순 · 누르면 상세</p><div class="chips">${L.slice(0,80).map(c=>`<span class="chip" data-coin="${c.id}" style="cursor:pointer">${esc(c.s)} <b class="${cls(v(c))}">${f1(v(c),0)}</b></span>`).join("")}${L.length>80?chip(`외 ${L.length-80}개`):""}</div>`;}
 document.getElementById("p-mkt").addEventListener("click",e=>{const b=e.target.closest("[data-br]");if(!b)return;const i=+b.dataset.br;brOpen=brOpen===i?null:i;renderMkt();});
+/* 선 차트 (호버·터치로 값 보기) */
+const LCD={};
+function lineChart(id,xs,series,{refs=[],fmt=v=>v.toFixed(1),W=660,H=210,ylab=""}={}){
+  W=Math.round(Math.min(W,Math.max(340,window.innerWidth-40)));
+  const L=44,R=92,T=12,Bm=22,n=xs.length;
+  if(n<2)return '<p class="sm na">기록이 부족합니다</p>';
+  const vals=series.flatMap(s=>s.v.filter(v=>v!=null)).concat(refs.map(r=>r.y));
+  let lo=Math.min(...vals),hi=Math.max(...vals);const pd=(hi-lo)*.08||1;lo-=pd;hi+=pd;
+  const X=i=>L+i/(n-1)*(W-L-R),Y=v=>T+(hi-v)/(hi-lo)*(H-T-Bm);
+  let g="";
+  for(let k=0;k<=3;k++){const v=lo+(hi-lo)*k/3,y=Y(v).toFixed(1);g+=`<line x1="${L}" x2="${W-R}" y1="${y}" y2="${y}" stroke="var(--line)" stroke-width="1"/><text x="${L-5}" y="${+y+3}" text-anchor="end">${fmt(v)}</text>`;}
+  [0,Math.floor((n-1)/2),n-1].forEach(i=>g+=`<text x="${X(i).toFixed(1)}" y="${H-6}" text-anchor="${i===0?"start":i===n-1?"end":"middle"}">${esc(xs[i])}</text>`);
+  refs.forEach(r=>{const y=Y(r.y).toFixed(1);g+=`<line x1="${L}" x2="${W-R}" y1="${y}" y2="${y}" stroke="var(--muted)" stroke-dasharray="4 3" stroke-width="1"/><text x="${W-R+4}" y="${+y+3}">${esc(r.label)}</text>`;});
+  const ends=[];
+  series.forEach(s=>{let seg=[],d="";s.v.forEach((v,i)=>{if(v==null){if(seg.length)d+="M"+seg.join("L");seg=[];}else seg.push(X(i).toFixed(1)+","+Y(v).toFixed(1));});if(seg.length)d+="M"+seg.join("L");
+    g+=`<path d="${d}" fill="none" stroke="${s.col}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" ${s.dash?'stroke-dasharray="5 4"':""}/>`;
+    const li=s.v.map((v,i)=>v==null?-1:i).filter(i=>i>=0).pop();if(li!=null)ends.push({s,y:Y(s.v[li]),x:X(li),v:s.v[li]});});
+  ends.sort((a,b)=>a.y-b.y);for(let k=1;k<ends.length;k++)if(ends[k].y-ends[k-1].y<12)ends[k].y=ends[k-1].y+12;
+  ends.forEach(e=>g+=`<circle cx="${e.x.toFixed(1)}" cy="${Y(e.v).toFixed(1)}" r="3" fill="${e.s.col}"/><text x="${W-R+4}" y="${(e.y+3).toFixed(1)}" class="el">${esc(e.s.n)} ${fmt(e.v)}</text>`);
+  LCD[id]={xs,series,X,n,L,R,W,fmt};
+  return `<div class="lc" data-lc="${id}"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(ylab)}">${g}<line class="xh" x1="0" x2="0" y1="${T}" y2="${H-Bm}" stroke="var(--muted)" stroke-width="1" style="display:none"/></svg><div class="tip"></div></div>`;
+}
+function lcMove(e){const box=e.target.closest(".lc");if(!box)return;const c=LCD[box.dataset.lc];if(!c)return;
+  const svg=box.querySelector("svg"),r=svg.getBoundingClientRect(),sx=(e.clientX-r.left)/r.width*c.W;
+  const i=Math.max(0,Math.min(c.n-1,Math.round((sx-c.L)/(c.W-c.L-c.R)*(c.n-1)))),x=c.X(i);
+  const ln=svg.querySelector(".xh");ln.setAttribute("x1",x);ln.setAttribute("x2",x);ln.style.display="";
+  const tip=box.querySelector(".tip");tip.innerHTML=`<b>${esc(c.xs[i])}</b>`+c.series.map(s=>`<div><span style="color:${s.col}">●</span> ${esc(s.n)} ${s.v[i]==null?"—":c.fmt(s.v[i])}</div>`).join("");
+  tip.style.display="block";const px=x/c.W*r.width;tip.style.left=Math.max(0,Math.min(px+10,r.width-tip.offsetWidth))+"px";}
+document.addEventListener("pointermove",e=>{if(e.target.closest&&e.target.closest(".lc"))lcMove(e);});
+document.addEventListener("pointerdown",e=>{if(e.target.closest&&e.target.closest(".lc"))lcMove(e);});
+document.addEventListener("pointerout",e=>{const b=e.target.closest&&e.target.closest(".lc");if(b&&!b.contains(e.relatedTarget)){b.querySelector(".tip").style.display="none";b.querySelector(".xh").style.display="none";}});
+const TCOL=["#3987e5","#d95926","#199e70","#c98500"];
+let tierP=30,dispP=30;
+function tierBox(){
+  const ts=D.tser||{},S=ts.s||[],P=tierP,btc=S.find(s=>s.n==="BTC"),tiers=S.filter(s=>s.n!=="BTC");
+  const seg=`<span class="seg">${[[7,"7일"],[30,"30일"],[90,"분기 (90일)"]].map(([k,t])=>`<button data-tp="${k}" aria-pressed="${P===k}">${t}</button>`).join("")}</span>`;
+  const slice=v=>{const a=v.slice(-(P+1)),b0=a.find(x=>x!=null);return a.map(x=>x!=null&&b0?x/b0*100:null);};
+  const ret=v=>{const a=slice(v),l=[...a].reverse().find(x=>x!=null);return l!=null?l-100:null;};
+  const info=n=>(D.tiers||[]).find(t=>t.n===n)||{};
+  const bret=btc?ret(btc.v):null;
+  let rows;
+  if(tiers.length&&bret!=null)rows=tiers.map((s,i)=>({n:s.n,rg:info(s.n).rg||"",rel:ret(s.v)-bret,abs:ret(s.v),col:TCOL[i%4],lead:info(s.n).lead}));
+  else{const base=B.c7!=null?(P===7?B.c7:B.c30):(P===7?D.mk.m7:D.mk.m30);rows=P===90?[]:(D.tiers||[]).map((t,i)=>({n:t.n,rg:t.rg,rel:(P===7?t.m7:t.m30)-base,abs:P===7?t.m7:t.m30,col:TCOL[i%4],lead:t.lead}));}
+  const mx=Math.max(...rows.map(t=>Math.abs(t.rel||0)),1),best=[...rows].sort((a,b)=>b.rel-a.rel)[0];
+  const xs=(ts.d||[]).slice(-(P+1));
+  const ch=tiers.length?lineChart("tier"+P,xs,[...tiers.map((s,i)=>({n:s.n,v:slice(s.v),col:TCOL[i%4]})),...(btc?[{n:"BTC",v:slice(btc.v),col:"var(--muted)",dash:true}]:[])],{fmt:v=>v.toFixed(0),W:520,H:280,ylab:"체급별 지수, 기간 시작 = 100"}):'<p class="sm na">일봉 기록이 쌓이면 차트가 나옵니다</p>';
+  return `<div class="box"><div class="bh"><h3>체급별 수익률</h3>${seg}</div>
+   <div class="tgrid"><div><p class="sm na" style="margin:0 0 4px">막대 = BTC 대비 (%p) · 아래 작은 글씨 = 실제 수익률</p>${rows.map(t=>{const w=Math.abs(t.rel)/mx*50;return `<div class="tier"><span><i class="tdot" style="background:${t.col}"></i>${t.n}<br><span class="na sm">${t.rg} · ${f1(t.abs,0)}</span></span><div class="b"><i style="${t.rel>=0?`left:50%;width:${w}%;background:var(--up)`:`right:50%;width:${w}%;background:var(--down)`}"></i></div><span class="num ${cls(t.rel)}">${f1(t.rel)}p</span></div>`}).join("")||'<p class="sm na">데이터 없음</p>'}
+   ${best?`<p class="sm" style="margin:8px 0 0">가장 강한 체급: <b>${best.n}</b>${best.lead?` · 대장 ${esc(best.lead.s)}`:""}. 메이저 → 대형 → 중형 → 마이너 순으로 번지면 알트 상승장이 넓어지는 신호.</p>`:""}</div>
+   <div><p class="sm na" style="margin:0 0 4px">차트 = 기간 시작을 100으로 맞춘 체급 지수 · 점선 BTC · 짚으면 날짜별 값</p>${ch}</div></div>
+   <p class="sm na" style="margin:6px 0 0">체급 지수: 추적 코인을 지금 시총으로 나눠 하루 수익률 중간값을 이어 붙임 (${tiers.map(s=>`${s.n} ${s.cnt}개`).join(" · ")||"—"})</p></div>`;
+}
+function dispBox(r){
+  const d=D.disp||{},ser=(d.ser||[]).slice(-dispP),nm=d.norm180;
+  const seg=`<span class="seg">${[[30,"1개월"],[180,"6개월"]].map(([k,t])=>`<button data-dp="${k}" aria-pressed="${dispP===k}">${t}</button>`).join("")}</span>`;
+  return `<div class="box"><div class="bh"><h3>섹터 순환</h3>${r==null?"":`<span class="state ${r>=2?"turn":"bounce"}">${r>=2?"순환장":"같이 움직임"}</span>`}${seg}</div>
+   ${r==null?'<p class="sm na">계산 불가</p>':`<div class="rot"><span class="hb" style="position:relative"><i style="width:${Math.min(r/3,1)*100}%;background:var(--accent)"></i><b style="left:66.6%"></b></span><span class="num">${r.toFixed(1)}배</span></div>
+   <div class="gl"><span>0</span><span>1배</span><span>2배 순환장</span><span>3배</span></div>`}
+   <div style="margin-top:10px">${ser.length>=5?lineChart("disp"+dispP,ser.map(x=>x[0]),[{n:"지금",v:ser.map(x=>x[1]),col:"var(--accent)"}],{fmt:v=>v.toFixed(1)+"%p",W:980,H:230,refs:nm?[{y:nm,label:"평소"},{y:nm*2,label:"2배"}]:[],ylab:"섹터끼리 7일 수익률 차이 추이"}):'<p class="sm na">기록이 쌓이면 추이 차트가 나옵니다</p>'}</div>
+   <details class="rule"><summary>뜻 보기</summary><ul><li>섹터끼리 7일 수익률 차이 (표준편차, %p). 게이지 = 지금 값 ÷ 최근 30일 평소</li><li>차트 = 날짜별 같은 값. 점선 '평소' = 최근 6개월 중간값, '2배' 선 위면 순환장</li><li>2배↑: 돈이 특정 섹터로 몰림 → 강한 섹터 고르기가 중요 · 평소 수준: 시장 전체가 같이 움직임 → BTC 방향이 중요</li></ul></details></div>`;
+}
+document.getElementById("p-mkt").addEventListener("click",e=>{const t=e.target.closest("[data-tp]");if(t){tierP=+t.dataset.tp;renderMkt();return;}const d=e.target.closest("[data-dp]");if(d){dispP=+d.dataset.dp;renderMkt();}});
 const bar=(v,col="var(--info)")=>`<span class="hb"><i style="width:${Math.max(0,Math.min(100,v))}%;background:${col}"></i></span>`;
 function renderMkt(){
   const y=D.cyc,r=D.disp&&D.disp.norm?D.disp.now/D.disp.norm:null,T=D.tiers||[];
   const {S,fr,cur,nxt}=stageNow();
-  const base=B.c7!=null?B.c7:D.mk.m7,baseN=B.c7!=null?"BTC 대비":"시장 전체 대비";
-  const rel=T.map(t=>({...t,rel:t.m7-base}));const mx=Math.max(...rel.map(t=>Math.abs(t.rel)),1);
-  const best=[...rel].sort((a,b)=>b.rel-a.rel)[0];
   const hist=[["7일간 오른 코인",y.b7,"var(--up)"],["30일간 오른 코인",y.b30,"var(--up)"],["90일 저점 대비 +50%↑",y.big,"var(--info)"],["90일 저점 대비 2배↑",y.hot,"var(--amber)"],["익절 구간",y.tp,"var(--amber)"],["급등 후 꺾임",y.brk,"var(--down)"]];
   const tiles=[["BTC 추세",BT.up==null?"—":BT.up?"상승 추세":"하락 추세",B.ma50?`50일선 ${B.px>B.ma50?"위":"아래"}`:"일봉 쌓는 중",BT.up],
     ["BTC 도미넌스",B.dom7==null?"—":`${B.dom7<0?"▼":"▲"} ${Math.abs(B.dom7).toFixed(1)}%p`,B.dom==null?"—":`${B.dom.toFixed(1)}% · 7일`,BT.domDown],
@@ -2246,21 +2386,16 @@ function renderMkt(){
    <div style="margin-top:14px"><span class="sm na">알트시즌 지수 (상위 50개 알트 중 ${esc(B.altbase||"")} BTC보다 더 오른 비율)</span>${B.alt==null?'<p class="sm na">계산 불가</p>':`<div class="gauge cg"><i style="left:${B.alt}%"></i><span style="left:${B.alt}%">${B.alt}</span></div>`}<div class="gl"><span>BTC 시즌</span><span>중립</span><span>알트시즌</span></div></div>
    <details class="rule"><summary>단계 판정 방식</summary><ul><li>팀 리더가 말한 8단계 흐름을 단계마다 3~4개 조건으로 바꿨습니다. 막대 = 그 단계 조건을 채운 비율</li><li>가장 많이 채운 단계가 현재 단계, 다음 단계를 절반 이상 채우면 "전환 중"</li><li>기준값은 검증 전입니다</li></ul></details></div>
   <div class="grid2" style="margin-top:14px">
-  <div class="box"><div class="bh"><h3>체급별 7일 수익률</h3><span class="sm na">${baseN}</span></div>
-   ${rel.map(t=>{const w=Math.abs(t.rel)/mx*50;return `<div class="tier"><span>${t.n}<br><span class="na sm">${t.rg}</span></span><div class="b"><i style="${t.rel>=0?`left:50%;width:${w}%;background:var(--up)`:`right:50%;width:${w}%;background:var(--down)`}"></i></div><span class="num ${cls(t.rel)}">${f1(t.rel)}</span></div>`}).join("")}
-   ${best?`<p class="sm" style="margin:8px 0 0">가장 강한 체급: <b>${best.n}</b>${best.lead?` · 대장 ${esc(best.lead.s)}`:""}. 메이저 → 대형 → 중형 → 마이너 순으로 번지면 알트 상승장이 넓어지는 신호.</p>`:""}</div>
-  <div class="box"><div class="bh"><h3>BTC와 알트</h3><span class="state ${alt>=2?"hold":"lost"}">알트 유리 ${alt}/${known||3}</span></div>
+  <div class="box"><div class="bh"><h3>BTC와 알트</h3><span class="state ${alt>=2?"hold":"lost"}">알트 유리 조건 ${alt}/3</span></div>
+   <p class="sm na" style="margin:-4px 0 8px">아래 3개 중 알트에 유리한 것 ${alt}개${known<3?` · ${3-known}개는 기록이 쌓이는 중이라 아직 판정 전`:""}</p>
    <div class="tiles">${tiles.map(([n,b,a,ok])=>`<div class="tile ${ok===true?"ok":ok===false?"no":""}"><span class="sm na">${n}</span><b>${b}</b><span class="sm">${a}</span></div>`).join("")}</div>
    <details class="rule"><summary>뜻 보기</summary><ul><li>BTC 추세: 일봉 50일선 위 + 50일선이 오르는 중이면 상승 추세</li><li>도미넌스 ▼: 돈이 BTC에서 알트로</li><li>알트/BTC ▲: BTC·ETH를 뺀 알트 시총이 BTC보다 빨리 커지는 중</li><li>도미넌스·알트/BTC는 3.0부터 기록을 쌓아 7일·30일 뒤부터 표시</li></ul></details>
-   <div class="chips">${[["CRYPTOCAP:BTC.D","BTC.D"],["CRYPTOCAP:TOTAL3","TOTAL3"],["CRYPTOCAP:TOTAL3/CRYPTOCAP:BTC","TOTAL3÷BTC"],["CRYPTOCAP:OTHERS.D","OTHERS.D"]].map(([s,t])=>`<a class="tvb" href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(s)}" target="_blank" rel="noopener">${t}</a>`).join("")}</div></div></div>
-  <div class="grid2" style="margin-top:14px">
+   <div class="chips">${[["CRYPTOCAP:BTC.D","BTC.D"],["CRYPTOCAP:TOTAL3","TOTAL3"],["CRYPTOCAP:TOTAL3/CRYPTOCAP:BTC","TOTAL3÷BTC"],["CRYPTOCAP:OTHERS.D","OTHERS.D"]].map(([s,t])=>`<a class="tvb" href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(s)}" target="_blank" rel="noopener">${t}</a>`).join("")}</div></div>
   <div class="box"><div class="bh"><h3>시장 폭</h3><span class="sm na">추적 ${y.n}개</span></div>
    <div class="hg">${hist.map(([n,v,c],i)=>`<button class="hrow" data-br="${i}" aria-expanded="${brOpen===i}"><span class="hl">${n} ▾</span>${bar(v,c)}<span class="hv num">${v.toFixed(0)}%</span></button>${brOpen===i?`<div class="brl">${breadthList(i)}</div>`:""}`).join("")}</div>
-   <p class="sm na" style="margin:6px 0 0">7일간 오른 코인: 1주 전 ${y.b7p.toFixed(0)}% → 지금 ${y.b7.toFixed(0)}%</p></div>
-  <div class="box"><div class="bh"><h3>섹터 순환</h3>${r==null?"":`<span class="state ${r>=2?"turn":"bounce"}">${r>=2?"순환장":"같이 움직임"}</span>`}</div>
-   ${r==null?'<p class="sm na">계산 불가</p>':`<div class="rot"><span class="hb" style="position:relative"><i style="width:${Math.min(r/3,1)*100}%;background:var(--accent)"></i><b style="left:66.6%"></b></span><span class="num">${r.toFixed(1)}배</span></div>
-   <div class="gl"><span>0</span><span>1배</span><span>2배 순환장</span><span>3배</span></div>`}
-   <details class="rule"><summary>뜻 보기</summary><ul><li>섹터끼리 7일 수익률 차이가 최근 30일 평소의 몇 배인지</li><li>2배↑: 돈이 특정 섹터로 몰림 → 강한 섹터 고르기가 중요</li><li>평소 수준: 시장 전체가 같이 움직임 → BTC 방향이 중요</li></ul></details></div></div>`;
+   <p class="sm na" style="margin:6px 0 0">7일간 오른 코인: 1주 전 ${y.b7p.toFixed(0)}% → 지금 ${y.b7.toFixed(0)}%</p></div></div>
+  <div style="margin-top:14px">${tierBox()}</div>
+  <div style="margin-top:14px">${dispBox(r)}</div>`;
 }
 
 /* 성적표 */
@@ -2352,7 +2487,7 @@ document.addEventListener("click",e=>{if(!e.target.closest(".search"))sres.style
 document.getElementById("foot").innerHTML=`<details class="rule"><summary>버전·변경 이력</summary><p class="sm">${esc(D.rule)}</p>${D.changelog.map(([v,d,k,items])=>`<h4>v${v} · ${d} · ${k}</h4><ul>${items.map(i=>`<li class="sm">${esc(i)}</li>`).join("")}</ul>`).join("")}</details>
 <p>섹터 모니터 v${D.v} · ${esc(D.subtitle)} · ${esc(D.credit)}</p>`;
 
-function renderAll(){renderRegime();renderTabs();renderFilt();renderHome();renderRot();renderEarly();renderSmall();renderPull();renderList();renderSec();renderMkt();renderBt();renderChk();}
+function renderAll(){renderRegime();renderTabs();renderFilt();renderHome();renderEarly();renderSmall();renderPull();renderList();renderSec();renderMkt();renderBt();renderChk();}
 renderAll();
 """
 
