@@ -21,12 +21,18 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "4.1"
+VERSION = "4.2"
 RELEASED = "2026-09-24"
 CREDIT = "Made by Tyler"
 SUBTITLE = "Project Charon for Team All Street"
 VERSION_RULE = "큰 업데이트(x.0)는 코인을 고르는 규칙이 바뀐 것, 작은 업데이트(x.1)는 화면·표시만 바뀐 것입니다. 실전 성적은 큰 버전별로 따로 집계합니다."
 CHANGELOG = [
+    ("4.2", "2026-09-24", "작은 업데이트", [
+        "체급별 수익률: 체급을 '기간 첫날 시총'으로 나눔 (지금 시총 기준이면 많이 오른 코인이 윗 체급으로 옮겨가 윗 체급 성적이 부풀려졌음)",
+        "체급별 대장을 기간별 수익률 1위로 (전에는 항상 30일 기준), 체급별 코인 수·계산 방식 표시",
+        "섹터 탭: 정렬해도 펼쳐 둔 RRG가 닫히지 않게, 정렬 줄을 순환 후보 바로 위로",
+        "시장 폭: 긴 항목 이름 때문에 ▾가 다음 줄로 내려가던 문제 수정",
+    ]),
     ("4.1", "2026-09-24", "작은 업데이트", [
         "순환 탭을 섹터 탭으로 합침: PC는 섹터 목록 옆에 RRG 그래프 고정, 모바일은 그래프를 접었다 펴기",
         "RRG 정리: 꼬리는 순환 후보·선택한 섹터만, 축 설명은 그래프 밖으로, 섹터를 누르면 그래프와 목록이 서로 따라감",
@@ -1258,23 +1264,39 @@ def market_view(W, markets, candles, glob_hist, btc_cd):
     norm180 = med([x for _, x in ser]) if ser else None
     disp = {"now": now_d, "norm": med(hist_d) if hist_d else None, "norm180": norm180,
             "ser": [[d[5:], round(x, 2)] for d, x in ser]}
-    # 체급별 지수 (추적 코인, 최근 180일 마감 봉 + 현재가, 하루 수익률 중간값을 이어 붙임) → 7·30·90일 차트
-    days = bd[-180:]
-    tser = {"d": [d[5:] for d in days] + ["지금"], "s": []}
-    if len(days) >= 30:
-        for nm, rg, lo, hi in TIERS:
-            ids = [i for i, c in coins.items() if lo <= c["mc"] < hi and i in candles]
-            cols = []
-            for i in ids:
+    # 체급별 지수 (4.1): 기간마다 '기간 첫날 시총'으로 체급을 나눔 (지금 시총으로 나누면 많이 오른 코인이 윗 체급으로 옮겨가
+    # 윗 체급 성적이 부풀려짐). 첫날 시총 ≈ 지금 시총 × 첫날 종가 ÷ 현재가 (유통량 변화는 무시)
+    days = bd[-91:]
+    tser = {"d": [d[5:] for d in days] + ["지금"], "p": {}}
+    if len(days) >= 8:
+        closes = {}
+        for i, c in coins.items():
+            if i in candles and c.get("px"):
                 m = dict(zip(candles[i].get("d") or [], candles[i].get("c") or []))
-                cols.append([m.get(d) for d in days] + [coins[i]["px"]])
-            if len(cols) >= 3:
-                tser["s"].append({"n": nm, "cnt": len(cols), "v": [round(x, 3) if x else None for x in chain_index(cols)]})
-        if b.get("px"):
-            m = dict(zip(bd, btc_cd["c"]))
-            bv = [m.get(d) for d in days] + [b["px"]]
-            b0 = next((x for x in bv if x), None)
-            tser["s"].append({"n": "BTC", "cnt": 1, "v": [round(x / b0 * 100, 3) if x and b0 else None for x in bv]})
+                closes[i] = [m.get(d) for d in days] + [c["px"]]
+        for P in (7, 30, 90):
+            if len(days) < P + 1:
+                continue
+            k0 = len(days) - P   # 기간 첫날 칸
+            out = []
+            for nm, rg, lo, hi in TIERS:
+                ids = [i for i, col in closes.items() if col[k0] and lo <= coins[i]["mc"] * col[k0] / col[-1] < hi]
+                cols = [closes[i][k0:] for i in ids]
+                if len(cols) < 3:
+                    continue
+                v = chain_index(cols)
+                rets = sorted(((pct(closes[i][-1], closes[i][k0]), i) for i in ids if coins[i]["vol"] >= TH["pick_volume"]), reverse=True)
+                L = rets[0] if rets else None
+                out.append({"n": nm, "rg": rg, "cnt": len(cols), "v": [round(x, 3) if x else None for x in v],
+                            "med": med(pct(closes[i][-1], closes[i][k0]) for i in ids),
+                            "lead": {"id": L[1], "s": coins[L[1]]["sym"], "r": L[0]} if L else None})
+            if b.get("px") and btc_cd:
+                m = dict(zip(bd, btc_cd["c"]))
+                bv = ([m.get(d) for d in days] + [b["px"]])[k0:]
+                b0 = bv[0]
+                if b0:
+                    out.append({"n": "BTC", "cnt": 1, "v": [round(x / b0 * 100, 3) if x else None for x in bv]})
+            tser["p"][str(P)] = out
     return {"btc": btc, "tiers": tiers, "lead": lead, "cyc": cyc, "disp": disp, "tser": tser}
 
 
@@ -1971,9 +1993,9 @@ details.sd[open] .sec{border-bottom:0}
 @media (max-width:700px){.steps{grid-template-columns:repeat(4,1fr)}}
 .tier{display:grid;grid-template-columns:62px 1fr 56px;gap:8px;align-items:center;font-size:.85rem;padding:5px 0}
 .hrow{display:grid;grid-column:1/-1;grid-template-columns:150px 1fr 44px;gap:10px;align-items:center;width:100%;padding:0;cursor:pointer;background:none;border:0;color:inherit;font:inherit;text-align:left}
-.hrow .hl{color:var(--text)}.hrow:hover .hl{color:var(--accent)}
+.hrow .hl{color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hrow:hover .hl{color:var(--accent)}
 .brl{grid-column:1/-1;padding:4px 0 8px;border-bottom:1px dashed var(--line)}
-@media (max-width:640px){.hrow{grid-template-columns:110px 1fr 40px}}
+@media (max-width:640px){.hrow{grid-template-columns:128px 1fr 40px}}
 :root,:root[data-theme]{color-scheme:dark;--bg:#1e1e1e;--bg2:#262626;--bg3:#303030;--line:#383838;--text:#dcddde;--muted:#a3a3a3;--faint:#767676;--accent:#a88bfa;--accent-bg:rgba(168,139,250,.11);--accent-line:rgba(168,139,250,.5);--up:#5cc99a;--down:#e5776e;--amber:#e3b25c;--amber-bg:rgba(227,178,92,.11);--info:#78b0e6;--info-bg:rgba(110,168,224,.11)}
 .z0{background:color-mix(in srgb,var(--up) 55%,transparent)}.z1{background:color-mix(in srgb,var(--up) 28%,transparent)}
 .z2{background:color-mix(in srgb,var(--amber) 45%,transparent)}.z3{background:color-mix(in srgb,var(--down) 30%,transparent)}.z4{background:color-mix(in srgb,var(--down) 55%,transparent)}
@@ -2340,23 +2362,21 @@ document.addEventListener("pointerout",e=>{const b=e.target.closest&&e.target.cl
 const TCOL=["#3987e5","#d95926","#199e70","#c98500"];
 let tierP=30,dispP=30;
 function tierBox(){
-  const ts=D.tser||{},S=ts.s||[],P=tierP,btc=S.find(s=>s.n==="BTC"),tiers=S.filter(s=>s.n!=="BTC");
+  const ts=D.tser||{},P=tierP,S=(ts.p||{})[String(P)]||[],btc=S.find(s=>s.n==="BTC"),tiers=S.filter(s=>s.n!=="BTC");
   const seg=`<span class="seg">${[[7,"7일"],[30,"30일"],[90,"분기 (90일)"]].map(([k,t])=>`<button data-tp="${k}" aria-pressed="${P===k}">${t}</button>`).join("")}</span>`;
-  const slice=v=>{const a=v.slice(-(P+1)),b0=a.find(x=>x!=null);return a.map(x=>x!=null&&b0?x/b0*100:null);};
-  const ret=v=>{const a=slice(v),l=[...a].reverse().find(x=>x!=null);return l!=null?l-100:null;};
-  const info=n=>(D.tiers||[]).find(t=>t.n===n)||{};
-  const bret=btc?ret(btc.v):null;
-  let rows;
-  if(tiers.length&&bret!=null)rows=tiers.map((s,i)=>({n:s.n,rg:info(s.n).rg||"",rel:ret(s.v)-bret,abs:ret(s.v),col:TCOL[i%4],lead:info(s.n).lead}));
-  else{const base=B.c7!=null?(P===7?B.c7:B.c30):(P===7?D.mk.m7:D.mk.m30);rows=P===90?[]:(D.tiers||[]).map((t,i)=>({n:t.n,rg:t.rg,rel:(P===7?t.m7:t.m30)-base,abs:P===7?t.m7:t.m30,col:TCOL[i%4],lead:t.lead}));}
+  const last=v=>[...v].reverse().find(x=>x!=null);
+  const bret=btc?last(btc.v)-100:null;
+  const rows=tiers.map((s,i)=>({n:s.n,rg:s.rg,abs:last(s.v)-100,med:s.med,rel:bret==null?null:last(s.v)-100-bret,col:TCOL[i%4],lead:s.lead,cnt:s.cnt}));
   const mx=Math.max(...rows.map(t=>Math.abs(t.rel||0)),1),best=[...rows].sort((a,b)=>b.rel-a.rel)[0];
   const xs=(ts.d||[]).slice(-(P+1));
-  const ch=tiers.length?lineChart("tier"+P,xs,[...tiers.map((s,i)=>({n:s.n,v:slice(s.v),col:TCOL[i%4]})),...(btc?[{n:"BTC",v:slice(btc.v),col:"var(--muted)",dash:true}]:[])],{fmt:v=>v.toFixed(0),W:520,H:280,ylab:"체급별 지수, 기간 시작 = 100"}):'<p class="sm na">일봉 기록이 쌓이면 차트가 나옵니다</p>';
+  const ch=tiers.length?lineChart("tier"+P,xs,[...tiers.map((s,i)=>({n:s.n,v:s.v,col:TCOL[i%4]})),...(btc?[{n:"BTC",v:btc.v,col:"var(--muted)",dash:true}]:[])],{fmt:v=>v.toFixed(0),W:520,H:280,ylab:"체급별 지수, 기간 첫날 = 100"}):'<p class="sm na">일봉 기록이 쌓이면 차트가 나옵니다</p>';
   return `<div class="box"><div class="bh"><h3>체급별 수익률</h3>${seg}</div>
-   <div class="tgrid"><div><p class="sm na" style="margin:0 0 4px">막대 = BTC 대비 (%p) · 아래 작은 글씨 = 실제 수익률</p>${rows.map(t=>{const w=Math.abs(t.rel)/mx*50;return `<div class="tier"><span><i class="tdot" style="background:${t.col}"></i>${t.n}<br><span class="na sm">${t.rg} · ${f1(t.abs,0)}</span></span><div class="b"><i style="${t.rel>=0?`left:50%;width:${w}%;background:var(--up)`:`right:50%;width:${w}%;background:var(--down)`}"></i></div><span class="num ${cls(t.rel)}">${f1(t.rel)}p</span></div>`}).join("")||'<p class="sm na">데이터 없음</p>'}
-   ${best?`<p class="sm" style="margin:8px 0 0">가장 강한 체급: <b>${best.n}</b>${best.lead?` · 대장 ${esc(best.lead.s)}`:""}. 메이저 → 대형 → 중형 → 마이너 순으로 번지면 알트 상승장이 넓어지는 신호.</p>`:""}</div>
-   <div><p class="sm na" style="margin:0 0 4px">차트 = 기간 시작을 100으로 맞춘 체급 지수 · 점선 BTC · 짚으면 날짜별 값</p>${ch}</div></div>
-   <p class="sm na" style="margin:6px 0 0">체급 지수: 추적 코인을 지금 시총으로 나눠 하루 수익률 중간값을 이어 붙임 (${tiers.map(s=>`${s.n} ${s.cnt}개`).join(" · ")||"—"})</p></div>`;
+   <div class="tgrid"><div><p class="sm na" style="margin:0 0 4px">막대 = BTC 대비 (%p) · 작은 글씨 = 체급 지수 수익률 · 대장</p>${rows.map(t=>{const w=Math.abs(t.rel||0)/mx*50;return `<div class="tier"><span><i class="tdot" style="background:${t.col}"></i>${t.n} <span class="na sm">${t.cnt}개</span><br><span class="na sm">${f1(t.abs,0)}${t.lead?` · 대장 ${esc(t.lead.s)} ${f1(t.lead.r,0)}`:""}</span></span><div class="b"><i style="${(t.rel||0)>=0?`left:50%;width:${w}%;background:var(--up)`:`right:50%;width:${w}%;background:var(--down)`}"></i></div><span class="num ${cls(t.rel)}">${t.rel==null?"—":f1(t.rel)+"p"}</span></div>`}).join("")||'<p class="sm na">일봉 기록이 부족합니다</p>'}
+   ${best&&best.rel!=null?`<p class="sm" style="margin:8px 0 0">가장 강한 체급: <b>${best.n}</b>. 메이저 → 대형 → 중형 → 마이너 순으로 번지면 알트 상승장이 넓어지는 신호.</p>`:""}</div>
+   <div><p class="sm na" style="margin:0 0 4px">차트 = 기간 첫날을 100으로 맞춘 체급 지수 · 점선 BTC · 짚으면 날짜별 값</p>${ch}</div></div>
+   <details class="rule"><summary>계산 방식</summary><ul><li>체급은 <b>기간 첫날 시총</b>으로 나눔 (메이저 $10B+ · 대형 $1~10B · 중형 $300M~1B · 마이너 $70~300M). 지금 시총으로 나누면 많이 오른 코인이 윗 체급으로 옮겨가 윗 체급 성적이 부풀려짐</li>
+   <li>체급 지수 = 그 체급 코인들의 하루 수익률 중간값을 날마다 이어 붙인 값 (한두 코인 급등에 덜 흔들림). 마감 일봉 + 현재가</li>
+   <li>대상: 섹터에 속한 추적 코인 (시총 상위 1000개 전체가 아님), BTC 제외. 대장 = 거래량 $5M 이상 중 그 기간 수익률 1위</li></ul></details></div>`;
 }
 function dispBox(r){
   const d=D.disp||{},ser=(d.ser||[]).slice(-dispP),nm=d.norm180;
@@ -2372,7 +2392,7 @@ const bar=(v,col="var(--info)")=>`<span class="hb"><i style="width:${Math.max(0,
 function renderMkt(){
   const y=D.cyc,r=D.disp&&D.disp.norm?D.disp.now/D.disp.norm:null,T=D.tiers||[];
   const {S,fr,cur,nxt}=stageNow();
-  const hist=[["7일간 오른 코인",y.b7,"var(--up)"],["30일간 오른 코인",y.b30,"var(--up)"],["90일 저점 대비 +50%↑",y.big,"var(--info)"],["90일 저점 대비 2배↑",y.hot,"var(--amber)"],["익절 구간",y.tp,"var(--amber)"],["급등 후 꺾임",y.brk,"var(--down)"]];
+  const hist=[["7일간 오른 코인",y.b7,"var(--up)"],["30일간 오른 코인",y.b30,"var(--up)"],["90일 저점 +50%↑",y.big,"var(--info)"],["90일 저점 2배↑",y.hot,"var(--amber)"],["익절 구간",y.tp,"var(--amber)"],["급등 후 꺾임",y.brk,"var(--down)"]];
   const tiles=[["BTC 추세",BT.up==null?"—":BT.up?"상승 추세":"하락 추세",B.ma50?`50일선 ${B.px>B.ma50?"위":"아래"}`:"일봉 쌓는 중",BT.up],
     ["BTC 도미넌스",B.dom7==null?"—":`${B.dom7<0?"▼":"▲"} ${Math.abs(B.dom7).toFixed(1)}%p`,B.dom==null?"—":`${B.dom.toFixed(1)}% · 7일`,BT.domDown],
     ["알트/BTC (TOTAL3÷BTC)",B.alt30==null?"—":`${B.alt30>=0?"▲":"▼"} ${Math.abs(B.alt30).toFixed(1)}%`,B.altd?`${B.altd}일`:"기록 쌓는 중",B.alt30==null?null:B.alt30>0]];
