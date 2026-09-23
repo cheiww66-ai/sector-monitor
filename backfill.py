@@ -115,164 +115,168 @@ def backtest(members, hist):
     last = {}
     top_dates = []
     start = 35
+    skipped = []
     for i in range(start, N - 7):
-        # 코인별 그날 지표
-        rows = {}
-        for cid, ks in coin_secs.items():
-            p, mc, v = A[cid]["p"], A[cid]["m"], A[cid]["v"]
-            if not (p[i] and p[i - 30] and p[i - 7] and p[i + 7] and mc[i] and v[i]) or mc[i] < TH["minor_mcap"] or v[i] < TH["min_volume"]:
+        try:
+            # 코인별 그날 지표
+            rows = {}
+            for cid, ks in coin_secs.items():
+                p, mc, v = A[cid]["p"], A[cid]["m"], A[cid]["v"]
+                if not (p[i] and p[i - 30] and p[i - 7] and p[i + 7] and mc[i] and v[i]) or mc[i] < TH["minor_mcap"] or v[i] < TH["min_volume"]:
+                    continue
+                r = {"id": cid, "ks": ks, "px": p[i], "mc": mc[i], "vol": v[i], "c3": pct(p[i], p[i - 3]), "c7": pct(p[i], p[i - 7]),
+                     "c30": pct(p[i], p[i - 30]), "r7": pct(p[i + 7], p[i]), "r30": pct(p[i + 30], p[i]) if i + 30 < N and p[i + 30] else None}
+                for n in (20, 60, 100, 200):
+                    w = win(p, i - n + 1, i + 1)
+                    r[f"ma{n}"] = sum(w) / n if i - n + 1 >= 0 and len(w) == n else None
+                vv = win(v, i - 22, i - 2)
+                r["vx"] = statistics.mean(win(v, i - 2, i + 1)) / statistics.mean(vv) if len(vv) >= 15 and statistics.mean(vv) > 0 else None
+                past = win(p, i - 30, i)
+                r["brk"] = len(past) >= 25 and p[i] > max(past)
+                r["hi30"] = pct(p[i], max(win(p, i - 29, i + 1)))
+                r["low7"] = min(win(p, i - 6, i + 1))
+                fut = win(p, i + 1, i + 8)
+                r["stop"] = bool(fut and min(fut) < r["low7"])
+                w90 = win(p, max(0, i - 89), i + 1)
+                r["run"], r["offpk"] = pct(p[i], min(w90)), pct(p[i], max(w90))
+                tp = None
+                if i >= 180:
+                    body = win(p, i - 179, i - 4)
+                    if body:
+                        j1 = max(range(len(body)), key=lambda j: body[j])
+                        p1, trough = body[j1], min(body[j1:] + [p[i]])
+                        if pct(trough, p1) <= TH["wave_dd"] and p[i] >= p1 * 0.9 and p[i] >= trough * 1.25:
+                            tp = "wave"
+                if not tp and r["run"] >= TH["tp_run"] and r["offpk"] >= TH["tp_near"]:
+                    tp = "run"
+                r["tp"] = tp
+                below = 0
+                for k in range(1, 15):
+                    j = i - k
+                    if j < 20 or not p[j]:
+                        break
+                    mj = win(p, j - 19, j + 1)
+                    if len(mj) == 20 and p[j] < sum(mj) / 20:
+                        below += 1
+                    else:
+                        break
+                r["rc"] = below if (r["ma20"] and p[i] > r["ma20"] and below >= TH["reclaim_days"]) else 0
+                rows[cid] = r
+            if len(rows) < 30:
                 continue
-            r = {"id": cid, "ks": ks, "px": p[i], "mc": mc[i], "vol": v[i], "c3": pct(p[i], p[i - 3]), "c7": pct(p[i], p[i - 7]),
-                 "c30": pct(p[i], p[i - 30]), "r7": pct(p[i + 7], p[i]), "r30": pct(p[i + 30], p[i]) if i + 30 < N and p[i + 30] else None}
-            for n in (20, 60, 100, 200):
-                w = win(p, i - n + 1, i + 1)
-                r[f"ma{n}"] = sum(w) / n if i - n + 1 >= 0 and len(w) == n else None
-            vv = win(v, i - 22, i - 2)
-            r["vx"] = statistics.mean(win(v, i - 2, i + 1)) / statistics.mean(vv) if len(vv) >= 15 and statistics.mean(vv) > 0 else None
-            past = win(p, i - 30, i)
-            r["brk"] = len(past) >= 25 and p[i] > max(past)
-            r["hi30"] = pct(p[i], max(win(p, i - 29, i + 1)))
-            r["low7"] = min(win(p, i - 6, i + 1))
-            fut = win(p, i + 1, i + 8)
-            r["stop"] = bool(fut and min(fut) < r["low7"])
-            w90 = win(p, max(0, i - 89), i + 1)
-            r["run"], r["offpk"] = pct(p[i], min(w90)), pct(p[i], max(w90))
-            tp = None
-            if i >= 180:
-                body = win(p, i - 179, i - 4)
-                if body:
-                    j1 = max(range(len(body)), key=lambda j: body[j])
-                    p1, trough = body[j1], min(body[j1:] + [p[i]])
-                    if pct(trough, p1) <= TH["wave_dd"] and p[i] >= p1 * 0.9 and p[i] >= trough * 1.25:
-                        tp = "wave"
-            if not tp and r["run"] >= TH["tp_run"] and r["offpk"] >= TH["tp_near"]:
-                tp = "run"
-            r["tp"] = tp
-            below = 0
-            for k in range(1, 15):
-                j = i - k
-                if j < 20 or not p[j]:
-                    break
-                mj = win(p, j - 19, j + 1)
-                if len(mj) == 20 and p[j] < sum(mj) / 20:
-                    below += 1
-                else:
-                    break
-            r["rc"] = below if (r["ma20"] and p[i] > r["ma20"] and below >= TH["reclaim_days"]) else 0
-            rows[cid] = r
-        if len(rows) < 30:
-            continue
-        mk7 = statistics.median(r["c7"] for r in rows.values())
-        mk30 = statistics.median(r["c30"] for r in rows.values())
-        S = {}
-        for k in members:
-            ms = [r for r in rows.values() if k in r["ks"]]
-            if len(ms) < 3:
-                continue
-            c7 = [r["c7"] for r in ms]
-            s = {"k": k, "m3": statistics.median(r["c3"] for r in ms), "m7": statistics.median(c7), "m30": statistics.median(r["c30"] for r in ms),
-                 "br": sum(1 for x in c7 if x > 0) / len(c7) * 100, "ms": ms, "f7": statistics.median(r["r7"] for r in ms),
-                 "f30": statistics.median([r["r30"] for r in ms if r["r30"] is not None] or [0]),
-                 "ok": len(ms) >= TH["sec_min"] and not secs.get(k, {}).get("watch")}
-            s["x7"], s["x30"] = s["m7"] - mk7, s["m30"] - mk30
-            s["score"] = s["x7"] * 2 + s["x30"] * .5 + (s["br"] - 50) * .3
-            S[k] = s
-        order = sorted(S.values(), key=lambda s: -s["score"])
-        for s in order:
-            s["top"] = False
-        for s in [s for s in order if s["ok"] and s["x7"] > 0 and s["x30"] > 0 and s["br"] >= TH["breadth_min"]][:TH["top_sec"]]:
-            s["top"] = True
-        for s in S.values():
-            c30s, c7s = [r["c30"] for r in s["ms"]], [r["c7"] for r in s["ms"]]
-            byret = sorted(s["ms"], key=lambda r: -r["c30"])
-            for r in s["ms"]:
-                z30, z7 = m.rz(r["c30"], c30s), m.rz(r["c7"], c7s)
-                pri = (s["top"] and z30 <= TH["z30"], s["top"], s["score"])
-                if "sec" not in r or pri > r["_pri"]:
-                    r.update(sec=s["k"], _pri=pri, z30=z30, z7=z7, srank=byret.index(r) + 1, sn=len(s["ms"]))
-        # 알트시즌 지수 (그날 시총 상위 50개 알트 중 90일 BTC보다 더 오른 비율)
-        alt = None
-        bp = A["bitcoin"]["p"]
-        if i >= 90 and bp[i] and bp[i - 90]:
-            b90 = pct(bp[i], bp[i - 90])
-            big = sorted([r for r in rows.values()], key=lambda r: -r["mc"])[:50]
-            r90 = [pct(A[r["id"]]["p"][i], A[r["id"]]["p"][i - 90]) for r in big if A[r["id"]]["p"][i - 90]]
-            r90 = [x for x in r90 if x is not None]
-            if len(r90) >= 25:
-                alt = sum(1 for x in r90 if x > b90) / len(r90) * 100
+            mk7 = statistics.median(r["c7"] for r in rows.values())
+            mk30 = statistics.median(r["c30"] for r in rows.values())
+            S = {}
+            for k in members:
+                ms = [r for r in rows.values() if k in r["ks"]]
+                if len(ms) < 3:
+                    continue
+                c7 = [r["c7"] for r in ms]
+                s = {"k": k, "m3": statistics.median([r["c3"] for r in ms if r["c3"] is not None] or [0]), "m7": statistics.median(c7), "m30": statistics.median(r["c30"] for r in ms),
+                     "br": sum(1 for x in c7 if x > 0) / len(c7) * 100, "ms": ms, "f7": statistics.median(r["r7"] for r in ms),
+                     "f30": statistics.median([r["r30"] for r in ms if r["r30"] is not None] or [0]),
+                     "ok": len(ms) >= TH["sec_min"] and not secs.get(k, {}).get("watch")}
+                s["x7"], s["x30"] = s["m7"] - mk7, s["m30"] - mk30
+                s["score"] = s["x7"] * 2 + s["x30"] * .5 + (s["br"] - 50) * .3
+                S[k] = s
+            order = sorted(S.values(), key=lambda s: -s["score"])
+            for s in order:
+                s["top"] = False
+            for s in [s for s in order if s["ok"] and s["x7"] > 0 and s["x30"] > 0 and s["br"] >= TH["breadth_min"]][:TH["top_sec"]]:
+                s["top"] = True
+            for s in S.values():
+                c30s, c7s = [r["c30"] for r in s["ms"]], [r["c7"] for r in s["ms"]]
+                byret = sorted(s["ms"], key=lambda r: -r["c30"])
+                for r in s["ms"]:
+                    z30, z7 = m.rz(r["c30"], c30s), m.rz(r["c7"], c7s)
+                    pri = (s["top"] and z30 <= TH["z30"], s["top"], s["score"])
+                    if "sec" not in r or pri > r["_pri"]:
+                        r.update(sec=s["k"], _pri=pri, z30=z30, z7=z7, srank=byret.index(r) + 1, sn=len(s["ms"]))
+            # 알트시즌 지수 (그날 시총 상위 50개 알트 중 90일 BTC보다 더 오른 비율)
+            alt = None
+            bp = A["bitcoin"]["p"]
+            if i >= 90 and bp[i] and bp[i - 90]:
+                b90 = pct(bp[i], bp[i - 90])
+                big = sorted([r for r in rows.values()], key=lambda r: -r["mc"])[:50]
+                r90 = [pct(A[r["id"]]["p"][i], A[r["id"]]["p"][i - 90]) for r in big if A[r["id"]]["p"][i - 90]]
+                r90 = [x for x in r90 if x is not None]
+                if len(r90) >= 25:
+                    alt = sum(1 for x in r90 if x > b90) / len(r90) * 100
 
-        def rec(track, r, store, key=None):
-            kk = (track, r["id"])
-            if kk in last and i - last[kk] < 7:
-                return None
-            last[kk] = i
-            s = S[r["sec"]]
-            row = {"x7": r["r7"] - s["f7"], "x30": (r["r30"] - s["f30"]) if r["r30"] is not None else None, "stop": r["stop"], "i": i}
-            store.append(row)
-            return row
-        for r in rows.values():
-            if "sec" not in r:
-                continue
-            s = S[r["sec"]]
-            r["under"] = r["z30"] <= TH["z30"] and r["z7"] <= TH["z7"] and r["c30"] <= TH["cap30"] and r["c7"] <= TH["cap7"]
-            r["hard"] = r["mc"] >= TH["pick_mcap"] and r["vol"] >= TH["pick_volume"]
-            r["a20"] = bool(r["ma20"] and r["px"] > r["ma20"])
-            r["cvol"] = r["vx"] is not None and r["vx"] >= TH["vol_x"]
-            r["nsig"] = sum([r["under"], r["a20"], r["cvol"], r["brk"]])
-            r["score"] = max(-r["z30"], 0) * 15 + min(max((r["vx"] or 1) - 1, 0) * 25, 25) + max(s["score"], 0) * .5 + (5 if r["c3"] > s["m3"] else 0)
-        live = [r for r in rows.values() if "sec" in r]
-        top = sorted([r for r in live if S[r["sec"]]["top"] and r["under"] and r["hard"]], key=lambda r: -r["mc"])[:3]
-        for r in top:
-            row = rec("top", r, T["top"])
-            if row:
-                top_dates.append((grid[i], row))
-                BYS.setdefault(S[r["sec"]]["k"], []).append(row)
-                if alt is not None:
-                    ALT["25 이하" if alt <= 25 else "25~50" if alt <= 50 else "50~75" if alt < 75 else "75 이상"].append(row)
-        tids = {r["id"] for r in top}
-        for r in sorted([r for r in live if r["id"] not in tids and S[r["sec"]]["top"] and r["mc"] >= TH["pick_mcap"] and r["nsig"] >= 2],
-                        key=lambda r: -r["score"])[:TH["early_max"]]:
-            rec("early", r, T["early"])
-        for r in sorted([r for r in live if r["id"] not in tids and r["mc"] < TH["pick_mcap"] and r["nsig"] >= 2], key=lambda r: -r["score"])[:TH["small_max"]]:
-            rec("small", r, T["small"])
-        for r in live:
-            s = S[r["sec"]]
-            if (s["x30"] >= TH["pull_sec30"] and r["c30"] >= TH["pull_c30"] and r["srank"] <= math.ceil(r["sn"] / 2) and r["ma20"]
-                    and r["px"] < r["ma20"] and TH["pull_hi_min"] <= r["hi30"] <= TH["pull_hi_max"]):
-                lv = sorted([r[f"ma{n}"] for n in (60, 100, 200) if r[f"ma{n}"] and r[f"ma{n}"] <= r["px"]], reverse=True)
-                if lv and pct(r["px"], lv[0]) <= TH["ma_near"]:
-                    rec("pull", r, T["pull"])
-            if r["rc"]:
-                rec("reclaim_turn" if (r["ma60"] and r["px"] > r["ma60"]) else "reclaim_bounce", r,
-                    T["reclaim_turn" if (r["ma60"] and r["px"] > r["ma60"]) else "reclaim_bounce"])
-            if r["tp"]:
-                rec("tp", r, T["tp"])
-        for s in S.values():
-            if s["top"]:
-                lead = max([r for r in s["ms"] if "sec" in r and r["sec"] == s["k"]] or [None], key=lambda r: r["c30"] if r else 0)
-                if lead:
-                    rec("lead", lead, T["lead"])
-        # 실험
-        for r in sorted([r for r in live if S[r["sec"]]["top"] and r["hard"] and r["z30"] <= -1.0 and r["z7"] <= TH["z7"]
-                         and r["c30"] <= TH["cap30"] and r["c7"] <= TH["cap7"]], key=lambda r: -r["mc"])[:3]:
-            rec("z10", r, X["z10"])
-        for r in sorted([r for r in live if S[r["sec"]]["top"] and r["under"] and r["hard"]], key=lambda r: -r["score"])[:3]:
-            rec("score", r, X["score"])
-        for r in sorted([r for r in live if S[r["sec"]]["top"] and r["hard"] and r["z30"] <= TH["z30"] and r["z7"] <= TH["z7"]], key=lambda r: -r["mc"])[:3]:
-            rec("nocap", r, X["nocap"])
-        for r in live:
-            si = sidx.get(r["sec"])
-            if not (S[r["sec"]]["top"] and r["under"] and r["hard"] and si and i >= 20):
-                continue
-            ratio = [A[r["id"]]["p"][j] / si[j] for j in range(i - 19, i + 1) if A[r["id"]]["p"][j] and si[j]]
-            if len(ratio) == 20 and ratio[-1] > sum(ratio) / 20:
-                rec("rs", r, X["rs"])
+            def rec(track, r, store, key=None):
+                kk = (track, r["id"])
+                if kk in last and i - last[kk] < 7:
+                    return None
+                last[kk] = i
+                s = S[r["sec"]]
+                row = {"x7": r["r7"] - s["f7"], "x30": (r["r30"] - s["f30"]) if r["r30"] is not None else None, "stop": r["stop"], "i": i}
+                store.append(row)
+                return row
+            for r in rows.values():
+                if "sec" not in r:
+                    continue
+                s = S[r["sec"]]
+                r["under"] = r["z30"] <= TH["z30"] and r["z7"] <= TH["z7"] and r["c30"] <= TH["cap30"] and r["c7"] <= TH["cap7"]
+                r["hard"] = r["mc"] >= TH["pick_mcap"] and r["vol"] >= TH["pick_volume"]
+                r["a20"] = bool(r["ma20"] and r["px"] > r["ma20"])
+                r["cvol"] = r["vx"] is not None and r["vx"] >= TH["vol_x"]
+                r["nsig"] = sum([r["under"], r["a20"], r["cvol"], r["brk"]])
+                r["score"] = max(-r["z30"], 0) * 15 + min(max((r["vx"] or 1) - 1, 0) * 25, 25) + max(s["score"], 0) * .5 + (5 if (r["c3"] or -999) > s["m3"] else 0)
+            live = [r for r in rows.values() if "sec" in r]
+            top = sorted([r for r in live if S[r["sec"]]["top"] and r["under"] and r["hard"]], key=lambda r: -r["mc"])[:3]
+            for r in top:
+                row = rec("top", r, T["top"])
+                if row:
+                    top_dates.append((grid[i], row))
+                    BYS.setdefault(S[r["sec"]]["k"], []).append(row)
+                    if alt is not None:
+                        ALT["25 이하" if alt <= 25 else "25~50" if alt <= 50 else "50~75" if alt < 75 else "75 이상"].append(row)
+            tids = {r["id"] for r in top}
+            for r in sorted([r for r in live if r["id"] not in tids and S[r["sec"]]["top"] and r["mc"] >= TH["pick_mcap"] and r["nsig"] >= 2],
+                            key=lambda r: -r["score"])[:TH["early_max"]]:
+                rec("early", r, T["early"])
+            for r in sorted([r for r in live if r["id"] not in tids and r["mc"] < TH["pick_mcap"] and r["nsig"] >= 2], key=lambda r: -r["score"])[:TH["small_max"]]:
+                rec("small", r, T["small"])
+            for r in live:
+                s = S[r["sec"]]
+                if (s["x30"] >= TH["pull_sec30"] and r["c30"] >= TH["pull_c30"] and r["srank"] <= math.ceil(r["sn"] / 2) and r["ma20"]
+                        and r["px"] < r["ma20"] and TH["pull_hi_min"] <= r["hi30"] <= TH["pull_hi_max"]):
+                    lv = sorted([r[f"ma{n}"] for n in (60, 100, 200) if r[f"ma{n}"] and r[f"ma{n}"] <= r["px"]], reverse=True)
+                    if lv and pct(r["px"], lv[0]) <= TH["ma_near"]:
+                        rec("pull", r, T["pull"])
+                if r["rc"]:
+                    rec("reclaim_turn" if (r["ma60"] and r["px"] > r["ma60"]) else "reclaim_bounce", r,
+                        T["reclaim_turn" if (r["ma60"] and r["px"] > r["ma60"]) else "reclaim_bounce"])
+                if r["tp"]:
+                    rec("tp", r, T["tp"])
+            for s in S.values():
+                if s["top"]:
+                    lead = max([r for r in s["ms"] if "sec" in r and r["sec"] == s["k"]] or [None], key=lambda r: r["c30"] if r else 0)
+                    if lead:
+                        rec("lead", lead, T["lead"])
+            # 실험
+            for r in sorted([r for r in live if S[r["sec"]]["top"] and r["hard"] and r["z30"] <= -1.0 and r["z7"] <= TH["z7"]
+                             and r["c30"] <= TH["cap30"] and r["c7"] <= TH["cap7"]], key=lambda r: -r["mc"])[:3]:
+                rec("z10", r, X["z10"])
+            for r in sorted([r for r in live if S[r["sec"]]["top"] and r["under"] and r["hard"]], key=lambda r: -r["score"])[:3]:
+                rec("score", r, X["score"])
+            for r in sorted([r for r in live if S[r["sec"]]["top"] and r["hard"] and r["z30"] <= TH["z30"] and r["z7"] <= TH["z7"]], key=lambda r: -r["mc"])[:3]:
+                rec("nocap", r, X["nocap"])
+            for r in live:
+                si = sidx.get(r["sec"])
+                if not (S[r["sec"]]["top"] and r["under"] and r["hard"] and si and i >= 20):
+                    continue
+                ratio = [A[r["id"]]["p"][j] / si[j] for j in range(i - 19, i + 1) if A[r["id"]]["p"][j] and si[j]]
+                if len(ratio) == 20 and ratio[-1] > sum(ratio) / 20:
+                    rec("rs", r, X["rs"])
+        except Exception as e:   # 하루 계산이 실패해도 나머지 날은 계속
+            skipped.append(f"{grid[i]} {type(e).__name__}: {str(e)[:80]}")
     if not T["top"] and not T["early"]:
         return None
     mid = len(grid) // 2
     halves = {f"앞 기간 (~{grid[mid]})": summ([r for d, r in top_dates if d <= grid[mid]]),
               f"뒤 기간 ({grid[mid]}~)": summ([r for d, r in top_dates if d > grid[mid]])}
-    return {"v": m.VERSION, "ts": m.NOW_TS, "start": grid[start], "end": grid[-8], "coins": len(coin_secs),
+    return {"v": m.VERSION, "ts": m.NOW_TS, "skipped": len(skipped), "skip_first": skipped[0] if skipped else None, "start": grid[start], "end": grid[-8], "coins": len(coin_secs),
             "lists": {k: summ(v) for k, v in T.items() if summ(v)}, "exp": {k: summ(v) for k, v in X.items() if summ(v)},
             "alt": {k: summ(v) for k, v in ALT.items() if summ(v)}, "halves": {k: v for k, v in halves.items() if v},
             "by_sector": {k: summ(v) for k, v in sorted(BYS.items(), key=lambda kv: -len(kv[1])) if summ(v)}}
@@ -327,11 +331,19 @@ def main():
     hist_store["v"] = 3     # 3.0부터 날짜 기준이 바뀌어 2.0 때 받은 기록은 다시 받음
     m.save(HIST_PATH, hist_store)
     hist = {cid: h for cid, h in hist_store["h"].items() if cid in pool or cid == "bitcoin"}
-    bt = backtest(members, hist)
+    try:
+        bt = backtest(members, hist)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("백테스트 계산 오류. 위 로그를 캡처해 주세요. 받은 과거 데이터는 보관되어 다시 실행하면 빠릅니다.")
+        raise
     if bt:
         bt["notes"] = notes
         m.save(os.path.join(m.DATA_DIR, "backtest.json"), bt)
     print(f"완료: 새로 받음 {fetched}, 건너뜀 {skipped}, 실패 {failed}, {time.time() - t0:.0f}초")
+    if bt and bt.get("skipped"):
+        print(f"  계산하지 못한 날 {bt['skipped']}일 · 첫 오류: {bt['skip_first']}")
     if bt:
         for k, s in bt["lists"].items():
             print(f"  {k}: n={s['n7']} 승률 {s['win7']:.0f}% 중간값 {s['med7']:+.2f}%p 평균 {s['avg7']:+.2f}%p")
