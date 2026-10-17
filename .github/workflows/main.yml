@@ -65,6 +65,7 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15   # 5.0: 배포가 멈춰도 다음 실행이 막히지 않게
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
