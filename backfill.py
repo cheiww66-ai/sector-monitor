@@ -146,7 +146,7 @@ def backtest(members, hist):
         return [x for x in xs[a:b] if x]
 
     T = {k: [] for k in ("top", "lag30", "early", "small", "pull", "reclaim_turn", "reclaim_bounce", "rsi_dip", "lead", "tp", "fall", "rsi_hot")}
-    X = {k: [] for k in ("imp_only", "no_move", "no_conf", "lag_sec", "per1")}
+    X = {k: [] for k in ("tier_S", "tier_M", "tier_L", "band", "band_under", "imp_only", "no_move", "no_conf", "lag_sec", "per1")}
     Q = {k: [] for k in ("rotsec", "q_imp", "q_lead", "q_weak", "q_lag", "hot30")}
     ALT = {"25 이하": [], "25~50": [], "50~75": [], "75 이상": []}
     BYS = {}
@@ -260,9 +260,8 @@ def backtest(members, hist):
                 for r in s["ms"]:
                     z30, z7 = m.rz(r["c30"], c30s), m.rz(r["c7"], c7s)
                     r.setdefault("zs", {})[s["k"]] = (z30, z7)
-                    pri = (s["rotc"], s["top"] and z30 <= TH["z30"], s["top"], s["score"])
-                    if "sec" not in r or pri > r["_pri"]:
-                        r.update(sec=s["k"], _pri=pri, z30=z30, z7=z7, srank=byret.index(r) + 1, sn=len(s["ms"]))
+                    if s["k"] == m.primary_sec(r["id"], [k for k in r["ks"] if k in S]):   # 5.0 본적 섹터 (고정)
+                        r.update(sec=s["k"], z30=z30, z7=z7, srank=byret.index(r) + 1, sn=len(s["ms"]))
             # 알트시즌 지수 (그날 시총 상위 50개 알트 중 90일 BTC보다 더 오른 비율)
             alt = None
             bp = A["bitcoin"]["p"]
@@ -315,9 +314,9 @@ def backtest(members, hist):
                               + (5 if r["cfirst"] else 0))
             live = [r for r in rows.values() if "sec" in r]
 
-            def pick3(cands, per_sec=TH["top_per_sec"]):
+            def pick3(cands, per_sec=TH["top_per_sec"], key=lambda r: -r["mc"]):
                 out, per = [], {}
-                for r in sorted(cands, key=lambda r: -r["mc"]):
+                for r in sorted(cands, key=key):
                     if per.get(r["sec"], 0) < per_sec and len(out) < 3:
                         out.append(r)
                         per[r["sec"]] = per.get(r["sec"], 0) + 1
@@ -363,7 +362,16 @@ def backtest(members, hist):
                     lead = max([r for r in s["ms"] if "sec" in r and r["sec"] == s["k"]] or [None], key=lambda r: r["c30"] if r else 0)
                     if lead:
                         rec("lead", lead, T["lead"])
-            # 실험 (Top 3 변형)
+            # 실험 (Top 3 변형) — 5.0: 중형·대형($300M~$10B) + 추천 점수 순 (과거 매출·베타는 없어 기본 점수만)
+            band = [r for r in live if S[r["sec"]]["rotc"] and r["hard"] and r["mc"] < TH["rec_max"] and r["cool"] and r["moving"]]
+            for r in pick3(band, key=lambda r: -r["score"]):
+                rec("band", r, X["band"])
+            for r in pick3([r for r in band if r["under"]], key=lambda r: -r["score"]):
+                rec("band_under", r, X["band_under"])
+            for kk, lo, hi in (("tier_S", 70e6, 300e6), ("tier_M", 300e6, 1e9), ("tier_L", 1e9, 10e9)):   # 5.0 체급별 Top 3
+                cand = [r for r in live if S[r["sec"]]["rotc"] and lo <= r["mc"] < hi and r["vol"] >= TH["pick_volume"] and r["cool"] and r["moving"]]
+                for r in pick3(cand, key=lambda r: -r["score"]):
+                    rec(kk, r, X[kk])
             base = [r for r in live if r["hard"] and r["cool"]]
             for r in pick3([r for r in base if S[r["sec"]]["rotc"] and S[r["sec"]]["q"] == "imp" and r["moving"]]):
                 rec("imp_only", r, X["imp_only"])
