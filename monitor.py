@@ -21,13 +21,24 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "5.0"
-RELEASED = "2026-10-17"
+VERSION = "6.0"
+RELEASED = "2026-10-18"
 CREDIT = "Made by Tyler"
 SUBTITLE = "Project Charon for Team All Street"
 VERSION_RULE = "큰 업데이트(x.0)는 코인을 고르는 규칙이 바뀐 것, 작은 업데이트(x.1)는 화면·표시만 바뀐 것입니다. 실전 성적은 큰 버전별로 따로 집계합니다."
 # 항목 앞 "!" = 중요 (보라 바탕), "-" = 삭제 (빨간 바탕)
 CHANGELOG = [
+    ("6.0", "2026-10-18", [
+        "!추천이 0개가 되던 문제 수정: 순환 후보 섹터·움직임을 '거르는 조건'에서 '점수'로. 안전(거래량·상장·펀딩·유통·업비트 유의)과 과열만 거름. 체급마다 항상 상위 3개 + 후보 5개",
+        "!총점과 점수 내역 표시 (덜 오름·거래량·섹터·매출 등 항목별 점수), 신호 강도 강·보통·약",
+        "!알트 사이클 8단계 → 4국면 (BTC 주도·알트 확산·알트 과열·하락 관망). 조건이 겹치지 않는 규칙으로 바꿈 (8단계는 같은 날 단계가 튀고 검증 전이었음)",
+        "!시장 탭 펀딩비: BTC·ETH·SOL·알트 중간값의 지금·1일·7일·30일 평균과 추세 (OKX·Bitget 기록)",
+        "선물 쏠림(레버리지 온도)을 게이지 한 줄과 한 문장 판정으로",
+        "방문자 수가 안 보일 때 원인을 데이터 점검 탭에 표시",
+        "탭 이름 '청산·레벨' → '청산 / 도미넌스'",
+        "-김프 표시 삭제",
+        "-베타 표시 삭제 (점수 계산에는 '움직임 크기'로 계속 사용)",
+    ]),
     ("5.0", "2026-10-17", [
         "!섹터를 코인마다 하나로 고정 (본적 섹터). 기능 섹터(밈·AI·대출·DEX 등)를 먼저, 체인 생태계는 뒤로. 전에는 그때 가장 강한 섹터로 바뀌어 LINK가 솔라나, UNI가 아비트럼으로 표시됐음",
         "섹터 추가: 레이어1 · DEX · 대출 · 거래소 토큰 · 오라클 · 인터롭",
@@ -605,6 +616,31 @@ def fetch_spot_vol():
             b = iid.split("-")[0]
             out[b] = out.get(b, 0) + (fl(r.get("volCcy24h")) or 0)   # 현물 volCcy24h = USDT 금액
     return out
+
+
+def fetch_fund_hist(bases=("BTC", "ETH", "SOL")):
+    """6.0 펀딩비 기록 (8시간 %, 하루 평균): OKX + Bitget 최근 약 33일. 바이낸스·바이비트는 GitHub 서버 IP 차단"""
+    out = {}
+    for b in bases:
+        per = {}
+        for url, key in ((f"https://www.okx.com/api/v5/public/funding-rate-history?instId={b}-USDT-SWAP&limit=100", "fundingTime"),
+                         (f"https://api.bitget.com/api/v2/mix/market/history-fund-rate?symbol={b}USDT&productType=usdt-futures&pageSize=100", "fundingTime")):
+            try:
+                for r in get_json(url, retries=1, timeout=20).get("data") or []:
+                    t, v = fl(r.get(key)), fl(r.get("fundingRate"))
+                    if t and v is not None:
+                        per.setdefault(utc_day(int(t) // 1000), []).append(v * 100)
+            except Exception:
+                pass
+        out[b] = [[d, round(sum(v) / len(v), 4)] for d, v in sorted(per.items()) if v][-31:]
+    return out
+
+
+def fund_row(ser, now):
+    """지금 · 1일 · 7일 · 30일 평균 (8시간 %)"""
+    v = [x[1] for x in ser]
+    avg = lambda n: round(sum(v[-n:]) / len(v[-n:]), 4) if v[-n:] else None
+    return {"now": round(now, 4) if now is not None else (v[-1] if v else None), "d1": avg(1), "d7": avg(7), "d30": avg(30), "ser": v[-30:]}
 
 
 def sp_state(r, chg):
@@ -1216,7 +1252,12 @@ def build_world(markets, sec_ids, candles, derivs, listing, upx, oi_prev, short,
         spt = (c["sp"] or {}).get("st")
         c["spb"] = (4 if spt == "spot" and (c["c3"] or 0) > 0 else 0) - (5 if spt == "lev" else 0)   # 현물 주도 상승 가점, 선물 과열 감점
         c["flb"] = -6 if c["float"] is not None and TH["float_min"] <= c["float"] < TH["float_warn"] else 0   # 유통 30~50% 감점
-        c["score5"] = round(c["score"] + c["rb"] + min(max((c.get("beta") or 1) - 1, 0) * 8, 6) + c["spb"] + c["flb"], 1)   # 5.0 추천 점수        # 눌림목: 강하게 오른 섹터의 선두권이 20일선 아래로 조정
+        bb = round(min(max((c.get("beta") or 1) - 1, 0) * 8, 6))
+        c["score5"] = round(c["score"] + c["rb"] + bb + c["spb"] + c["flb"] + (4 if c["a20"] else 0), 1)   # 6.0 추천 점수 (총점)
+        c["sc"] = [p for p in [["덜 오름", round(max(-c["z30"], 0) * 10)], ["거래량 증가", round(min(max((c["vx"] or 1) - 1, 0) * 25, 25))],
+                               ["섹터 " + ("순환 후보" if s["rotc"] else "개선·주도"), 12 if s["rotc"] else 5 if s["q"] in ("imp", "lead") else 0],
+                               ["20일선 위", 4 if c["a20"] else 0], ["3일 섹터보다 강함", 5 if c["cfirst"] else 0], ["숏 스퀴즈", 6 if c["squeeze"] else 0],
+                               ["매출", c["rb"]], ["움직임 크기", bb], ["선물/현물", c["spb"]], ["유통", c["flb"]], [f"경고 {len(w)}개", -3 * len(w)]] if p[1]]        # 눌림목: 강하게 오른 섹터의 선두권이 20일선 아래로 조정
         conds = [("섹터 30일 강함", s["x30"] >= TH["pull_sec30"]), ("코인 30일 +10% 이상", c["c30"] >= TH["pull_c30"]),
                  ("섹터 안 상위 절반", c["srank"] <= math.ceil(c["sn"] / 2)), ("20일선 아래", bool(c["ma20"] and c["px"] < c["ma20"])),
                  (f"고점 대비 {TH['pull_hi_max']:.0f}~{TH['pull_hi_min']:.0f}%", c["hi30"] is not None and TH["pull_hi_min"] <= c["hi30"] <= TH["pull_hi_max"])]
@@ -1270,7 +1311,7 @@ def build_world(markets, sec_ids, candles, derivs, listing, upx, oi_prev, short,
     for c in live.values():
         s = secs[c["sec"]]
         c["rt"] = next((k for k, _, lo, hi in REC_TIERS if lo <= c["mc"] < hi), None)   # 5.0 추천 체급
-        c["tpass"] = bool(s["rotc"] and c["hard5"] and c["rt"] and cool(c) and c["moving"])
+        c["tpass"] = bool(c["hard5"] and c["rt"] and cool(c) and not s["watch"])   # 6.0: 섹터 상태·움직임은 점수로 (관문 아님)
         c["kept"] = bool(c["id"] in prev_top and not c["tpass"] and s["q"] in ("imp", "lead") and not s["watch"] and cool(c) and c["hard5"] and c["rt"])
     tops = {}
     for k, _, _, _ in REC_TIERS:   # 체급마다 Top 3 (추천 점수 순, 섹터당 2개)
@@ -1286,8 +1327,7 @@ def build_world(markets, sec_ids, candles, derivs, listing, upx, oi_prev, short,
     top_ids = [c["id"] for c in top]
     early = []
     for k, _, _, _ in REC_TIERS:   # 후보: 체급마다 5개
-        early += sorted([c for c in live.values() if c["id"] not in top_ids and c["rt"] == k and (secs[c["sec"]]["rotc"] or secs[c["sec"]]["q"] in ("imp", "lead"))
-                         and c["vol"] >= TH["pick_volume"] and c["nsig"] >= 2 and not c["hot"]], key=lambda c: -c["score5"])[:5]
+        early += sorted([c for c in live.values() if c["id"] not in top_ids and c["rt"] == k and c["tpass"]], key=lambda c: -c["score5"])[:5]   # 6.0: 4~8위
     # 대조군: 3.0 Top 3 (돈 모인 상위 섹터 안에서 덜 오른 코인, 시총 순)
     lag30 = []
     for c in sorted(live.values(), key=lambda c: -c["mc"]):
@@ -1750,7 +1790,7 @@ COIN_KEYS = ["id", "sym", "name", "sec", "secs", "px", "mc", "vol", "c1", "c3", 
              "hi30", "brk", "slope", "hl", "rc", "vx", "spark", "ma20line", "z30", "z7", "srank", "sn", "mrank", "L", "fund", "oi", "sh",
              "upx", "ex20", "uwarn", "under", "a20", "cvol", "cfirst", "sq", "sqn", "squeeze", "warns", "fatal", "hard", "sig", "nsig",
              "score", "pull", "pullmiss", "reclaim", "kept", "run", "offpk", "tp", "tv", "src", "listwhy", "topRank", "rsi", "dip", "age",
-             "hot", "moving", "tpass", "lagsec", "beta", "corr", "rev", "rb", "score5", "kimp", "rt", "img", "sp", "spb", "flb", "float"]
+             "hot", "moving", "tpass", "lagsec", "beta", "corr", "rev", "rb", "score5", "kimp", "rt", "img", "sp", "spb", "flb", "float", "sc"]
 
 
 def slim(c):
@@ -2041,6 +2081,36 @@ def main():
     if MOCK and PREVIEW:
         M["btc"]["alt"] = 58   # 미리보기: 가짜 가격으로는 지수가 0이 나와 정상 구간 값으로 표시
     W["alt"] = M["btc"].get("alt")
+    # 6.0 펀딩비 (BTC·ETH·SOL: 거래소 기록 / 알트 중간값: 자체 하루 기록)
+    td0 = utc_day(NOW_TS)
+    if MOCK:
+        fh = {}
+        for b, base in (("BTC", 0.008), ("ETH", 0.009), ("SOL", 0.012)):
+            rr, v, ser = random.Random(b + "f"), base, []
+            for k in range(30, 0, -1):
+                v = max(-0.02, min(0.05, v + rr.gauss(0.0004, 0.004)))
+                ser.append([utc_day(NOW_TS - k * DAY_S), round(v, 4)])
+            fh[b] = ser
+    else:
+        fh = safe("펀딩비 기록", fetch_fund_hist, {}, "펀딩비 기록")
+    fnow = {}
+    for b in ("BTC", "ETH", "SOL"):
+        vs = [d[b] for d in derivs.values() if b in d and d[b].get("fund_h") is not None]
+        if vs and sum(x["oi"] for x in vs):
+            fnow[b] = sum(x["fund_h"] * x["oi"] for x in vs) / sum(x["oi"] for x in vs) * 8 * 100
+    fm = [x for x in (cache.get("fund_mk") or []) if x[0] != td0]
+    if MOCK and not fm:
+        rr, v = random.Random("fm"), 0.01
+        for k in range(30, 0, -1):
+            v = max(-0.02, min(0.06, v + rr.gauss(0.0005, 0.005)))
+            fm.append([utc_day(NOW_TS - k * DAY_S), round(v, 4)])
+    fr_ = [c["fund"] / 1095 for c in W["coins"].values() if c.get("fund") is not None]
+    mk_now = med(fr_) if fr_ else None
+    if mk_now is not None:
+        fm.append([td0, round(mk_now, 4)])
+    cache["fund_mk"] = fm[-60:]
+    M["fund"] = {"maj": {b: fund_row(fh.get(b) or [], fnow.get(b)) for b in ("BTC", "ETH", "SOL")},
+                 "mk": fund_row(cache["fund_mk"], mk_now), "n": len(fr_)}
     # 선물/현물 배율 기록 (코인별 하루 1칸 8일, 시장 중간값 180일)
     spr, td = cache.get("spr") or {}, utc_day(NOW_TS)
     rs = []
@@ -2098,6 +2168,7 @@ def main():
               ("Bitget", "https://www.bitget.com", "일봉(이평선), 선물 OI·펀딩·거래량·롱숏 비율, 현물 거래량", ["Bitget 선물", "Bitget 롱숏 비율", "Bitget 상장 목록", "거래소 일봉", "현물 거래대금"], 2, True),
               ("OKX", "https://www.okx.com", "일봉(대체), 선물 OI·펀딩", ["OKX 선물", "OKX 상장 목록"], 2, True),
               ("Hyperliquid", "https://app.hyperliquid.xyz", "선물 OI·펀딩", ["Hyperliquid 선물"], 2, True),
+              ("펀딩비 기록", "https://www.okx.com", "BTC·ETH·SOL 30일 펀딩 (OKX·Bitget)", ["펀딩비 기록"], 2, True),
               ("업비트", "https://upbit.com", "원화 거래대금·김프, 마켓·투자유의, 상장 공지", ["업비트 거래대금", "업비트 마켓", "Upbit 상장 목록", "업비트 공지"], 2, True),
               ("빗썸", "https://www.bithumb.com", "원화 상장 목록", ["빗썸"], 24, True),
               ("Binance", "https://www.binance.com", "상장 목록(CoinGecko 경유), 상장 공지", ["Binance 상장 목록", "바이낸스 공지"], 24, True),
@@ -2437,7 +2508,7 @@ details.sd[open] .sec{border-bottom:0}
 .btn{display:flex;flex-direction:column;gap:2px}.bt .flip{margin:0}
 @media (max-width:640px){.tb{grid-template-columns:80px 1fr}.tvx{grid-column:span 2}.bt{grid-template-columns:110px 1fr 40px 56px}.bt>.sm,.bt>.na{display:none}.hg{grid-template-columns:110px 1fr 40px}}
 
-.steps{display:grid;grid-template-columns:repeat(8,1fr);gap:4px;margin-top:4px}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:4px}
 .st{position:relative;display:flex;flex-direction:column;gap:2px;padding:8px 6px 10px;border-radius:8px;background:var(--bg2);overflow:hidden;font-size:.74rem;line-height:1.3}
 .st .dot{width:20px;height:20px;border-radius:50%;background:var(--bg3);display:grid;place-items:center;font-size:.72rem;font-weight:700}
 .st .sn{font-weight:600;color:var(--muted)}.st .sa{color:var(--faint);font-size:.68rem}
@@ -2504,6 +2575,18 @@ dialog.rfull .dl{max-height:100dvh}
 .spc.spot{background:rgba(92,201,154,.13);color:var(--up)}.spc.lev{background:var(--amber-bg);color:var(--amber)}.spc.bal{background:var(--bg3);color:var(--faint)}
 .spbox svg{display:block;width:100%;height:auto}.spbox text{font-size:10px;fill:var(--faint)}
 .spleg{display:flex;gap:12px;font-size:.74rem;color:var(--muted);margin:4px 0}.spleg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.ftab td,.ftab th{font-size:.82rem}.ftab td:first-child{text-align:left;font-weight:650}
+.fv{font-variant-numeric:tabular-nums}.fv.hot{color:var(--amber);font-weight:700}.fv.neg{color:var(--up);font-weight:700}
+.lg{position:relative;height:14px;border-radius:7px;overflow:hidden;display:flex;margin:22px 0 4px}
+.lg i{display:block;height:100%}.lgw{position:relative}
+.lgm{position:absolute;top:-20px;transform:translateX(-50%);font-size:.78rem;font-weight:700;white-space:nowrap}
+.lgm::after{content:"";position:absolute;left:50%;top:18px;width:3px;height:22px;margin-left:-1.5px;background:var(--text);border-radius:2px}
+.lgm.ghost{color:var(--faint);font-weight:500;top:auto;bottom:-20px}.lgm.ghost::after{top:-24px;height:22px;background:var(--faint);width:2px}
+.lgl{display:flex;justify-content:space-between;font-size:.72rem;color:var(--muted);margin-top:20px}
+.sig{font-size:.72rem;font-weight:700;padding:1px 7px;border-radius:999px}
+.sig.s3{background:var(--accent);color:#fff}.sig.s2{background:var(--accent-bg);color:var(--accent)}.sig.s1{background:var(--bg3);color:var(--faint)}
+.scl{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}.scl span{font-size:.74rem;padding:1px 7px;border-radius:4px;background:var(--bg3)}
+.scl span.p{color:var(--up)}.scl span.m{color:var(--down)}
 .rtseg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
 .rtseg button{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:1px;border:1px solid var(--line);border-radius:10px;background:var(--bg2);padding:8px 10px;cursor:pointer;text-align:left;color:var(--muted)}
 .rtseg button b{font-size:.98rem;color:var(--text)}.rtseg button span{font-size:.72rem}
@@ -2603,7 +2686,7 @@ function ladder(c,leg=true){
 const secTxt=c=>`<span class="secchip">${esc(SX[c.sec].n)} · 수익률 ${c.srank}/${c.sn}위 · 시총 ${c.mrank}위</span>`;
 const vtxt=c=>c.vx==null?"—":`${c.vx.toFixed(1)}배<span class="vbar" aria-hidden="true"><i style="width:${Math.min(c.vx/3,1)*100}%"></i></span>`;
 let STG=null;const stg=()=>STG||(STG=stageNow());
-function tpChip(c){if(!c.tp)return "";if(c.tp[0]==="꺾임 주의")return chip("꺾임 주의","warn");const late=stg().cur>=3&&stg().cur<=5;return chip(late?"익절 구간":"익절 참고",late?"warn":"");}
+function tpChip(c){if(!c.tp)return "";if(c.tp[0]==="꺾임 주의")return chip("꺾임 주의","warn");const late=stg().cur===2;return chip(late?"익절 구간":"익절 참고",late?"warn":"");}
 function badges(c){let b=tpChip(c);if(c.squeeze)b+=chip("스퀴즈 준비","hot");if(c.kept)b+=chip("유지 중","ok");return b;}
 const warns=c=>(c.warns||[]).map(w=>chip(w,"warn")).join("");
 const sigTxt=c=>`<div class="sm" style="white-space:normal;color:var(--info)" title="${c.sig.filter(x=>x[1]).map(x=>x[0]).join(", ")}">신호 ${c.nsig} · ${c.sig.filter(x=>x[1]&&x[0]!=="스퀴즈 준비").map(x=>x[0]).slice(0,3).join(" · ")}</div>`;
@@ -2637,27 +2720,20 @@ const nEx=c=>`<span class="num" title="${EXS.filter(([k])=>(c.L||"").includes(k)
 /* 사이클 (팀 리더 조언 8단계) */
 const B=D.btc||{};
 const BT={up:B.up==null?null:B.up&&B.slopeUp,domDown:B.dom7==null?null:B.dom7<0,alt:B.alt,dd:B.dd};
-const STAGES=[["BTC 상승","BTC 관찰·보유"],["메이저 알트 상승","알트 진입"],["알트 순환매","대장·테마 추적"],["알트 급등","수익실현 준비"],["알트 고점","매도"],["알트 급락","무리한 재진입 X"],["조정 후 BTC","BTC 매수"],["다음 사이클 준비","다음 파동 탐색"]];
+const STAGES=[["BTC 주도","BTC 보유 · 알트는 대형 위주"],["알트 확산","알트 진입 · 추천 활용"],["알트 과열","수익 실현 · 추격 금지"],["하락 · 관망","현금·BTC · 무리한 진입 X"]];
 function stageScores(){
-  const y=D.cyc,T=Object.fromEntries((D.tiers||[]).map(t=>[t.n,t.m7])),r=D.disp&&D.disp.norm?D.disp.now/D.disp.norm:null;
-  const bigT=((T["메이저"]||0)+(T["대형"]||0))/2,smT=((T["중형"]||0)+(T["소형"]||0))/2;
-  const A=BT.alt,has=A!=null;
-  const q=(t,v)=>[t+(v==null?" (데이터 없음)":""),OK(v)];
-  return [
-   [q("BTC 상승 추세",BT.up),q("도미넌스 상승",BT.domDown==null?null:!BT.domDown),q("알트시즌 25 이하",has?A<=25:null),q("메이저가 가장 강함",bigT>smT)],
-   [q("BTC 상승 추세",BT.up),q("도미넌스 하락",BT.domDown),q("메이저·대형이 중소형보다 강함",bigT>smT),q("알트시즌 25~50",has?A>25&&A<=50:null)],
-   [q("중형·소형가 더 강함",smT>bigT),q("섹터 순환 1.5배 이상",r==null?null:r>=1.5),q("알트시즌 40~75",has?A>=40&&A<75:null),q("7일 오른 코인 50% 이상",y.b7>=50)],
-   [q("알트시즌 75 이상",has?A>=75:null),q("2배↑ 코인 20% 이상",y.hot>=20),q("30일 오른 코인 70% 이상",y.b30>=70)],
-   [q("익절 구간 15% 이상",y.tp>=15),q("7일 오른 코인 1주 새 감소",y.b7<y.b7p-10),q("알트시즌 60 이상",has?A>=60:null)],
-   [q("7일 오른 코인 30% 미만",y.b7<30),q("꺾인 코인 15% 이상",y.brk>=15),q("BTC 하락 추세 또는 도미넌스 상승",BT.up==null?null:(!BT.up||BT.domDown===false))],
-   [q("BTC 고점 대비 −20% 이하",BT.dd==null?null:BT.dd<=-20),q("알트시즌 25 이하",has?A<=25:null),q("7일 오른 코인 30~50%",y.b7>=30&&y.b7<=50)],
-   [q("BTC 50일선 회복",BT.up),q("알트시즌 25 이하",has?A<=25:null),q("섹터 순환 1배 미만",r==null?null:r<1)]];
+  const y=D.cyc,A=BT.alt,has=A!=null,q=(t,v)=>[t+(v==null?" (데이터 없음)":""),OK(v)];
+  return [[q("BTC 50일선 위",BT.up),q("알트시즌 지수 50 미만",has?A<50:null)],
+   [q("BTC 50일선 위",BT.up),q("알트시즌 지수 50~75",has?A>=50&&A<75:null),q("익절 구간 코인 15% 미만",y.tp<15)],
+   [q("알트시즌 지수 75 이상",has?A>=75:null),q("또는 익절 구간 코인 15% 이상",y.tp>=15)],
+   [q("BTC 50일선 아래",BT.up==null?null:!BT.up)]];
 }
-function stageNow(){const S=stageScores(),fr=S.map(c=>c.filter(x=>x[1]).length/c.length);const cur=fr.indexOf(Math.max(...fr));
-  return {S,fr,cur,nxt:cur+1<8&&fr[cur+1]>=.5?cur+1:null};}
+function stageNow(){const S=stageScores(),y=D.cyc,A=BT.alt;
+  const cur=BT.up===false?3:(A!=null&&A>=75)||y.tp>=15?2:A!=null&&A>=50?1:0;
+  return {S,fr:S.map((_,i)=>i===cur?1:0),cur,nxt:null};}
 
 /* 탭 */
-const TABS=[["home","순위"],["sec","섹터",()=>ROT.length],["early","추천",()=>TOP.filter(shown).length+EARLY.filter(shown).length],["list","상장",()=>LISTC.filter(shown).length],["mkt","시장"],["lvl","청산·레벨"],["chk","데이터 점검"],["glos","용어·원리"]];
+const TABS=[["home","순위"],["sec","섹터",()=>ROT.length],["early","추천",()=>TOP.filter(shown).length+EARLY.filter(shown).length],["list","상장",()=>LISTC.filter(shown).length],["mkt","시장"],["lvl","청산 / 도미넌스"],["chk","데이터 점검"],["glos","용어·원리"]];
 let cur="home";
 function renderTabs(){document.getElementById("tabs").innerHTML=TABS.map(([k,n,f])=>`<button role="tab" id="t-${k}" aria-controls="p-${k}" aria-selected="${k===cur}" data-tab="${k}"${k==="glos"?' class="mini"':""}>${n}${f?`<span class="c">${f()}</span>`:""}</button>`).join("");}
 function go(k){cur=k;for(const [t] of TABS)document.getElementById("p-"+t).hidden=t!==k;renderTabs();document.querySelector(".wrap").classList.toggle("wide",k==="sec");if(k==="sec")renderSec();const b=document.querySelector(".bar");if(window.scrollY>b.offsetTop)window.scrollTo({top:b.offsetTop});}
@@ -2668,7 +2744,7 @@ document.getElementById("filt").addEventListener("change",e=>{const k=e.target.d
 
 function renderRegime(){
   const lead=D.secs.filter(s=>s.q==="lead"&&!s.watch).sort((a,b)=>b.rsr-a.rsr).map(s=>s.n);const st=stageNow();
-  document.getElementById("regime").innerHTML=`<b>사이클 ${st.cur+1}단계: ${STAGES[st.cur][0]}</b> · 할 일 ${STAGES[st.cur][1]} · 순환 후보 <b>${ROT.map(s=>s.n).join(", ")||"없음"}</b> · 주도 ${lead.slice(0,3).join(", ")||"없음"} · 대장 <b>${D.lead.vol?D.lead.vol.s:"—"}</b><span class="sub">${D.asof} 갱신 · 이평선은 ${D.cday} 마감 봉 + 현재가</span>`;
+  document.getElementById("regime").innerHTML=`<b>국면: ${STAGES[st.cur][0]}</b> · 할 일 ${STAGES[st.cur][1]} · 알트시즌 ${BT.alt==null?"—":BT.alt} · 순환 후보 <b>${ROT.map(s=>s.n).join(", ")||"없음"}</b> · 주도 ${lead.slice(0,3).join(", ")||"없음"} · 대장 <b>${D.lead.vol?D.lead.vol.s:"—"}</b><span class="sub">${D.asof} 갱신 · 이평선은 ${D.cday} 마감 봉 + 현재가</span>`;
 }
 
 /* 순위 */
@@ -2678,9 +2754,9 @@ function renderHome(){
   const seg=`<div class="ctl"><span class="seg">${Object.entries(per).map(([k,t])=>`<button data-rk="${k}" aria-pressed="${rk===k}">${t}</button>`).join("")}</span><span class="sm na">${rk==="sq"?"숏이 몰린 코인 · 신호 2개 이상":"가장 많이 오른 코인 15개"}</span></div>`;
   if(rk==="sq")return renderSq(seg);
   const rows=live.filter(c=>shown(c)&&c[rk]!=null).sort((a,b)=>b[rk]-a[rk]).slice(0,15);
-  document.getElementById("p-home").innerHTML=seg+(rows.length?`<div class="tbl"><table><thead><tr><th>#</th><th style="text-align:left">코인</th><th>30일 흐름</th><th>${per[rk]}</th><th>24h 거래량</th><th>거래량 변화</th><th title="RSI(14) 일봉. 75 이상 과열, 30 이하 과매도">RSI</th><th title="시장(추적 코인 중간값)이 1% 움직일 때 이 코인이 움직인 정도, 최근 60일. 1.3 이상 = 시장보다 크게 움직임">베타</th><th class="bcol" title="업비트 원화가가 해외가보다 비싼 정도">김프</th><th>시총</th><th title="업비트·Bitget·OKX·바이낸스 중 현물 상장된 곳">상장</th><th></th></tr></thead><tbody>
+  document.getElementById("p-home").innerHTML=seg+(rows.length?`<div class="tbl"><table><thead><tr><th>#</th><th style="text-align:left">코인</th><th>30일 흐름</th><th>${per[rk]}</th><th>24h 거래량</th><th>거래량 변화</th><th title="RSI(14) 일봉. 75 이상 과열, 30 이하 과매도">RSI</th><th>시총</th><th title="업비트·Bitget·OKX·바이낸스 중 현물 상장된 곳">상장</th><th></th></tr></thead><tbody>
   ${rows.map((c,i)=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td class="na">${i+1}</td><td style="text-align:left">${ico(c)}<span class="nm">${esc(c.s)}</span> <span class="secchip">${esc(SX[c.sec].n)}</span><div class="chips">${tpChip(c)}${c.topRank?chip("추천","hot"):""}${TREND.has(c.id)?chip("검색 트렌딩","ok"):""}${revChip(c)}${spChip(c)}${c.uwarn?chip("업비트 유의","warn"):""}</div></td>
-  <td class="sp">${spark(c)}</td><td class="num ${cls(c[rk])}"><b>${f1(c[rk])}</b></td><td class="num">${usd(c.vol)}</td><td class="num">${vtxt(c)}</td><td class="num">${rsiTxt(c)}</td><td class="num">${betaTxt(c)}</td><td class="num bcol ${c.kimp>=5?"dn":""}">${c.kimp==null?'<span class="na">—</span>':f1(c.kimp)}</td><td class="num">${usd(c.mc)}</td><td>${nEx(c)}</td><td>${tvBtn(c)}</td></tr>`).join("")}</tbody></table></div><p class="sm na" style="margin:6px 0 0">코인을 누르면 관련 코인(같은 섹터 · 같이 움직인 코인)이 나옵니다. 베타 1.3↑ = 시장이 오를 때 더 오르고 빠질 때 더 빠짐</p>`:`<div class="empty">${rk==="c180"?"180일 기록이 아직 부족합니다 (일봉 180개 필요)":"해당 코인 없음"}</div>`)+
+  <td class="sp">${spark(c)}</td><td class="num ${cls(c[rk])}"><b>${f1(c[rk])}</b></td><td class="num">${usd(c.vol)}</td><td class="num">${vtxt(c)}</td><td class="num">${rsiTxt(c)}</td><td class="num">${usd(c.mc)}</td><td>${nEx(c)}</td><td>${tvBtn(c)}</td></tr>`).join("")}</tbody></table></div><p class="sm na" style="margin:6px 0 0">코인을 누르면 상세와 관련 코인(같은 섹터 · 같이 움직인 코인)이 나옵니다</p>`:`<div class="empty">${rk==="c180"?"180일 기록이 아직 부족합니다 (일봉 180개 필요)":"해당 코인 없음"}</div>`)+
   `<h3>대장</h3><div class="chips">${D.lead.vol?chip(`거래대금 대장 ${D.lead.vol.s} ${f1(D.lead.vol.c30,0)}`,"hot"):""}${D.lead.ret?chip(`상승률 대장 ${D.lead.ret.s} ${f1(D.lead.ret.c30,0)}`,"hot"):""}</div>
   ${D.changes.length?`<h3>추천 변화</h3><div class="chips">${D.changes.map(x=>`<span class="chip ${x.t==="in"?"ok":""}" ${x.sec?`data-gorot="${x.sec}" style="cursor:pointer"`:x.id?`data-coin="${x.id}" style="cursor:pointer"`:""} title="${esc(x.why.join(", "))}">${x.t==="in"?"＋":"－"} ${esc(x.s)} · ${esc(x.why[0])}</span>`).join("")}</div>`:""}`;
 }
@@ -2695,14 +2771,16 @@ function renderSq(seg){
 document.getElementById("p-home").addEventListener("click",e=>{const b=e.target.closest("[data-rk]");if(b){rk=b.dataset.rk;renderHome();}});
 
 /* 초입 후보 */
+const sigLv=c=>c.score5>=35?["s3","강"]:c.score5>=20?["s2","보통"]:["s1","약"];
+const scList=c=>`<div class="scl">${(c.sc||[]).map(([t,v])=>`<span class="${v>0?"p":"m"}">${esc(t)} ${v>0?"+":""}${v}</span>`).join("")}</div>`;
 function miniCard(c){
-  const s=SX[c.sec];
+  const s=SX[c.sec],L=sigLv(c);
   return `<div class="pk"><div class="ph" data-coin="${c.id}"><span class="rk">${c.topRank}위</span>${ico(c)}<span class="sym">${esc(c.s)}</span>${tchip(c)}<span class="secchip">${esc(s.n)}</span>
-   <span class="num sm">7일 <b class="${cls(c.c7)}">${f1(c.c7,0)}</b> · 30일 <b class="${cls(c.c30)}">${f1(c.c30,0)}</b></span><span class="sc">점수 <b>${c.score5.toFixed(0)}</b></span></div>
-  <details><summary>근거 · 매출 · 무효선</summary>
-   <p class="why">${qChip(s)} 확인 ${s.nconf}/4${c.a20?" · 20일선 위":""}${c.cfirst?" · 3일 섹터보다 강함":""}</p>
-   <div class="chips">${spChip(c,true)}${revChip(c,true)}${c.beta!=null?chip(`베타 ${c.beta.toFixed(1)}`,c.beta>=1.3?"hot":""):""}${c.beta>=1.3&&!c.rev?chip("매출 없음","warn"):""}${c.kimp!=null?chip(`김프 ${f1(c.kimp)}`,c.kimp>=5?"warn":""):""}${(c.warns||[]).slice(0,2).map(w=>chip(w,"warn")).join("")}${c.kept?chip("유지 중","ok"):""}</div>
-   <div class="sm na" style="margin-top:4px">점수 = 기본 ${c.score.toFixed(0)}${c.rb?` · 매출 ${c.rb>0?"+":""}${c.rb}`:""}${c.score5-c.score-c.rb-(c.spb||0)-(c.flb||0)>0?` · 베타 +${(c.score5-c.score-c.rb-(c.spb||0)-(c.flb||0)).toFixed(0)}`:""}${c.spb?` · 선물/현물 ${c.spb>0?"+":""}${c.spb}`:""}${c.flb?` · 유통 ${c.flb}`:""}</div>
+   <span class="num sm">7일 <b class="${cls(c.c7)}">${f1(c.c7,0)}</b> · 30일 <b class="${cls(c.c30)}">${f1(c.c30,0)}</b></span><span class="sc"><span class="sig ${L[0]}">${L[1]}</span> 총점 <b>${c.score5.toFixed(0)}</b></span></div>
+  <details><summary>점수 내역 · 근거 · 무효선</summary>
+   ${scList(c)}
+   <p class="why" style="margin-top:6px">${qChip(s)} 확인 ${s.nconf}/4</p>
+   <div class="chips">${spChip(c,true)}${revChip(c,true)}${(c.warns||[]).slice(0,2).map(w=>chip(w,"warn")).join("")}</div>
    <div class="stop">무효: ${esc(stopTxt(c))} · ${tvBtn(c)}</div></details></div>`;
 }
 function condRows(c){
@@ -2719,9 +2797,9 @@ function coinTable(rows,key){
   const sk=sortSt[key];
   rows=[...rows].filter(c=>tierF==="all"||tierOf(c)===tierF).sort((a,b)=>sk==="score"?b.score5-a.score5:sk==="rb"?b.rb-a.rb:sk==="vx"?(b.vx||0)-(a.vx||0):sk==="c7"?a.c7-b.c7:a.c30-b.c30);
   const th=(k,t)=>`<th><button data-sort="${k}" data-list="${key}" ${sk===k?'aria-sort="descending"':""}>${t}${sk===k?" ▾":""}</button></th>`;
-  return `<div class="tbl"><table><thead><tr><th>코인</th><th>30일 흐름</th><th>상장</th>${th("c7","7일")}${th("c30","30일")}${th("vx","거래량")}<th>베타</th>${th("rb","매출")}${th("score","점수")}<th></th></tr></thead><tbody>
+  return `<div class="tbl"><table><thead><tr><th>코인</th><th>30일 흐름</th><th>상장</th>${th("c7","7일")}${th("c30","30일")}${th("vx","거래량")}${th("rb","매출")}${th("score","총점")}<th></th></tr></thead><tbody>
   ${rows.map(c=>`<tr class="row" data-coin="${c.id}" tabindex="0"><td>${ico(c)}<span class="nm">${esc(c.s)}</span> ${tchip(c)} ${secTxt(c)}${sigTxt(c)}<div class="chips">${spChip(c)}${badges(c)}${warns(c)}</div></td>
-  <td class="sp">${spark(c)}</td><td>${nEx(c)}</td><td class="num ${cls(c.c7)}">${f1(c.c7)}</td><td class="num ${cls(c.c30)}">${f1(c.c30)}</td><td class="num">${vtxt(c)}</td><td class="num">${betaTxt(c)}</td><td class="num">${c.rev?`<span class="revc${c.rb<=0?" lo":""}">P/S ${c.rev.ps.toFixed(0)}</span><div class="sm na">${usd(c.rev.r30)}/월 <span class="${cls(c.rev.chg)}">${f1(c.rev.chg,0)}</span></div>`:'<span class="na sm">—</span>'}</td><td class="num"><b>${c.score5.toFixed(0)}</b></td><td>${tvBtn(c)}</td></tr>`).join("")||'<tr><td colspan="10" class="na">해당 코인 없음</td></tr>'}</tbody></table></div>`;
+  <td class="sp">${spark(c)}</td><td>${nEx(c)}</td><td class="num ${cls(c.c7)}">${f1(c.c7)}</td><td class="num ${cls(c.c30)}">${f1(c.c30)}</td><td class="num">${vtxt(c)}</td><td class="num">${c.rev?`<span class="revc${c.rb<=0?" lo":""}">P/S ${c.rev.ps.toFixed(0)}</span><div class="sm na">${usd(c.rev.r30)}/월 <span class="${cls(c.rev.chg)}">${f1(c.rev.chg,0)}</span></div>`:'<span class="na sm">—</span>'}</td><td class="num"><b>${c.score5.toFixed(0)}</b> <span class="sig ${sigLv(c)[0]}">${sigLv(c)[1]}</span></td><td>${tvBtn(c)}</td></tr>`).join("")||'<tr><td colspan="9" class="na">해당 코인 없음</td></tr>'}</tbody></table></div>`;
 }
 let sqOnly=false,tierF="all",recT="M";
 const TOPS={S:byIds((D.tops||{}).S),M:byIds((D.tops||{}).M),L:byIds((D.tops||{}).L)};
@@ -2741,10 +2819,10 @@ function renderEarly(){let r=EARLY.filter(c=>shown(c)&&c.rt===recT);if(sqOnly)r=
   const R=RT[recT];
   document.getElementById("p-early").innerHTML=`<div class="rtseg">${Object.entries(RT).map(([k,[n,rg]])=>`<button data-rt2="${k}" aria-pressed="${recT===k}"><b>${n}</b><span>${rg}</span><i>${TOPS[k].filter(shown).length}</i></button>`).join("")}</div>
   <p class="sm na" style="margin:6px 0 10px">${R[2]}</p>
-  <h3 style="margin-top:0">${R[0]} Top 3 <span class="sm na">순환 후보 섹터 · ${R[1]} · 추천 점수 순</span></h3>
+  <h3 style="margin-top:0">${R[0]} Top 3 <span class="sm na">${R[1]} · 총점 순 · 강 35+ · 보통 20+ · 약 20 미만</span></h3>
   ${G.html}${t.length?`<div class="picks${G.weak?" weak":""}">${t.map(miniCard).join("")}</div>`:`<div class="empty">${ROT.length?"순환 후보 섹터는 있지만 조건을 모두 통과한 코인이 없습니다.":"지금은 순환 후보 섹터가 없습니다."} 억지로 찾지 않는 것이 정상입니다.</div>`}
-  <details class="rule"><summary>Top 3 기준</summary><ul><li>섹터: 순환 후보 (개선 상태 또는 막 주도로 넘어감 + 30일 시장 대비 +${TH.rot_x30}%p 이하 + 확인 신호 ${TH.rot_conf}개 이상)</li><li>과열 아님: 7일 +${TH.cap7}% · 30일 +${TH.cap30}% 이하 · RSI ${TH.rsi_hot} 미만</li><li>움직이기 시작: 20일선 위 또는 3일 수익률이 섹터보다 강함</li><li>안전: 거래량 $5M+ · 상장 2곳+ · 롱 과열 아님 · 업비트 유의 아님</li><li>체급: 소형 $70M~300M · 중형 $300M~1B · 대형 $1B~10B마다 따로 3개. 메이저($10B+)는 추천 안 함</li><li>순서: 추천 점수 = 덜 오름 + 거래량 증가 + 순환 후보 섹터 + 매출 가점(P/S·매출 증가) + 베타 가점(최대 6점)</li><li>알트시즌 지수 50 미만이면 흐리게 (필터)</li><li>시총 순, 한 섹터에서 ${TH.top_per_sec}개까지. 섹터가 개선·주도 상태면 유지</li></ul></details>
-  <h3>${R[0]} 후보 <span class="sm na">개선·주도 섹터 · 신호 2개 이상 · RSI 과열 제외 · 추천 점수 순 · 최대 5개</span></h3>
+  <details class="rule"><summary>Top 3 기준</summary><ul><li>거르는 조건은 안전·과열뿐. 섹터 상태(순환 후보 +12 · 개선/주도 +5)와 움직임(20일선 위 +4 · 3일 섹터보다 강함 +5)은 점수</li><li>과열 아님: 7일 +${TH.cap7}% · 30일 +${TH.cap30}% 이하 · RSI ${TH.rsi_hot} 미만</li><li>안전: 거래량 $5M+ · 상장 2곳+ · 롱 과열 아님 · 업비트 유의 아님</li><li>체급: 소형 $70M~300M · 중형 $300M~1B · 대형 $1B~10B마다 따로 3개. 메이저($10B+)는 추천 안 함</li><li>순서: 추천 점수 = 덜 오름 + 거래량 증가 + 순환 후보 섹터 + 매출 가점(P/S·매출 증가) + 베타 가점(최대 6점)</li><li>알트시즌 지수 50 미만이면 흐리게 (필터)</li><li>시총 순, 한 섹터에서 ${TH.top_per_sec}개까지. 섹터가 개선·주도 상태면 유지</li></ul></details>
+  <h3>${R[0]} 후보 <span class="sm na">4~8위 · 총점 순</span></h3>
   <details class="rule"><summary>기준 보기</summary><ul><li>후보 신호: 덜 오름 · 20일선 위 · 거래량 증가 · 추세 돌파 · 스퀴즈 준비 · 업비트 관심</li><li>항상 제외: 거래량 $1M 미만, 상장 거래소 없음 (지금 ${D.excluded}개)</li></ul></details>
   <div class="ctl"><label class="tog" style="margin:0"><input type="checkbox" id="sqonly" ${sqOnly?"checked":""}>스퀴즈 준비만</label></div>${coinTable(r,"early")}
 `;}
@@ -2976,13 +3054,15 @@ function renderMkt(){
     ["알트/BTC (TOTAL3÷BTC)",B.alt30==null?"—":`${B.alt30>=0?"▲":"▼"} ${Math.abs(B.alt30).toFixed(1)}%`,B.altd?`${B.altd}일`:"기록 쌓는 중",B.alt30==null?null:B.alt30>0]];
   const alt=tiles.filter(t=>t[3]===true).length,known=tiles.filter(t=>t[3]!=null).length;
   document.getElementById("p-mkt").innerHTML=`
-  <div class="box"><div class="bh"><h3>알트 사이클</h3><span class="state turn">${cur+1}. ${STAGES[cur][0]}${nxt!=null?` → ${nxt+1}. ${STAGES[nxt][0]} 전환 중`:""}</span></div>
+  <div class="box"><div class="bh"><h3>시장 국면</h3><span class="state turn">${STAGES[cur][0]}</span></div>
    <div class="steps">${STAGES.map(([n,a],i)=>`<div class="st ${i===cur?"on":i===nxt?"nx":""}"><span class="dot">${i+1}</span><span class="sn">${n}</span><span class="sa">${a}</span><i style="width:${fr[i]*100}%"></i></div>`).join("")}</div>
    <div class="bh" style="margin:10px 0 4px"><b>지금 할 일: ${STAGES[cur][1]}</b></div>
    <div class="chips">${S[cur].map(([t,ok])=>chip((ok?"✓ ":"✕ ")+t,ok?"ok":"")).join("")}</div>
    ${nxt!=null?`<div class="chips" style="margin-top:4px"><span class="sm na">다음 단계 조건:</span>${S[nxt].map(([t,ok])=>chip((ok?"✓ ":"✕ ")+t,ok?"ok":"")).join("")}</div>`:""}
    <div style="margin-top:14px"><span class="sm na">알트시즌 지수 (상위 50개 알트 중 ${esc(B.altbase||"")} BTC보다 더 오른 비율)</span>${B.alt==null?'<p class="sm na">계산 불가</p>':`<div class="gauge cg"><i style="left:${B.alt}%"></i><span style="left:${B.alt}%">${B.alt}</span></div>`}<div class="gl"><span>BTC 시즌</span><span>중립</span><span>알트시즌</span></div></div>
-   <details class="rule"><summary>단계 판정 방식</summary><ul><li>팀 리더가 말한 8단계 흐름을 단계마다 3~4개 조건으로 바꿨습니다. 막대 = 그 단계 조건을 채운 비율</li><li>가장 많이 채운 단계가 현재 단계, 다음 단계를 절반 이상 채우면 "전환 중"</li><li>기준값은 검증 전입니다</li></ul></details></div>
+   <details class="rule"><summary>판정 방식</summary><ul><li>위에서부터 차례로 하나만 고름 (겹치지 않음): BTC가 50일선 아래 → <b>하락·관망</b> / 알트시즌 지수 75 이상 또는 익절 구간 코인 15% 이상 → <b>알트 과열</b> / 알트시즌 지수 50 이상 → <b>알트 확산</b> / 나머지 → <b>BTC 주도</b></li>
+   <li>알트시즌 지수 근거: 과거 1년 Top 3 7일 승률이 25~50 구간 ${(D.bt&&D.bt.alt&&D.bt.alt["25~50"])?D.bt.alt["25~50"].win7.toFixed(0)+"%":"—"}, 50~75 구간 ${(D.bt&&D.bt.alt&&D.bt.alt["50~75"])?D.bt.alt["50~75"].win7.toFixed(0)+"%":"—"}</li>
+   <li>팀 리더 8단계와 대응: 1단계 = BTC 주도 · 2~3단계 = 알트 확산 · 4~5단계 = 알트 과열 · 6~7단계 = 하락·관망 · 8단계 = 다시 BTC 주도</li></ul></details></div>
   <div class="grid2" style="margin-top:14px">
   <div class="box"><div class="bh"><h3>BTC와 알트</h3><span class="state ${alt>=2?"hold":"lost"}">알트 유리 조건 ${alt}/3</span></div>
    <p class="sm na" style="margin:-4px 0 8px">아래 3개 중 알트에 유리한 것 ${alt}개${known<3?` · ${3-known}개는 기록이 쌓이는 중이라 아직 판정 전`:""}</p>
@@ -2992,7 +3072,7 @@ function renderMkt(){
   <div class="box"><div class="bh"><h3>시장 폭</h3><span class="sm na">추적 ${y.n}개</span></div>
    <div class="hg">${hist.map(([n,v,c],i)=>`<button class="hrow" data-br="${i}" aria-expanded="${brOpen===i}"><span class="hl">${n} ▾</span>${bar(v,c)}<span class="hv num">${v.toFixed(0)}%</span></button>${brOpen===i?`<div class="brl">${breadthList(i)}</div>`:""}`).join("")}</div>
    <p class="sm na" style="margin:6px 0 0">7일간 오른 코인: 1주 전 ${y.b7p.toFixed(0)}% → 지금 ${y.b7.toFixed(0)}%</p></div></div>
-  <div class="grid2" style="margin-top:14px">${kimpBox()}${levBox()}</div>
+  <div class="grid2" style="margin-top:14px">${fundBox()}${levBox()}</div>
   <div style="margin-top:14px">${tierBox()}</div>
   <div style="margin-top:14px">${dispBox(r)}</div>`;
 }
@@ -3019,32 +3099,33 @@ function liqBox(){
    <li>실제 포지션이 아니라 추정치. 바이낸스·바이비트 선물은 GitHub 서버에서 막혀 빠짐 → Coinglass 청산맵과 다를 수 있음</li></ul></details>
    <div class="chips"><a class="tvb" href="https://www.coinglass.com/pro/futures/LiquidationHeatMap" target="_blank" rel="noopener">Coinglass 청산맵</a></div></div>`;
 }
-function kimpBox(){
-  const K=D.kimp;if(!K||!K.fx)return `<div class="box"><h3>김프</h3><p class="sm na">업비트 시세를 받으면 표시됩니다</p></div>`;
-  const ks=C.filter(c=>c.kimp!=null&&Math.abs(c.kimp)<30&&shown(c));
-  const hi=[...ks].sort((a,b)=>b.kimp-a.kimp).slice(0,5),lo=[...ks].sort((a,b)=>a.kimp-b.kimp).slice(0,5);
-  const st=(K.btc||0)>=5?["lev","과열"]:(K.btc||0)<=-1?["spot","역프"]:["bal","보통"];
-  const row=(L,t)=>`<div class="chips"><span class="sm na" style="min-width:64px">${t}</span>${L.map(c=>`<span class="chip" data-coin="${c.id}" style="cursor:pointer">${esc(c.s)} <b class="${c.kimp>=5?"dn":c.kimp<0?"up":""}">${f1(c.kimp)}</b></span>`).join("")}</div>`;
-  return `<div class="box"><div class="bh"><h3>김프</h3><span class="spc ${st[0]}">${st[1]}</span></div>
-   <div class="tiles"><div class="tile"><span class="sm na">BTC 김프</span><b class="${(K.btc||0)>=5?"dn":""}">${f1(K.btc)}</b><span class="sm">업비트 vs 해외</span></div>
-   <div class="tile"><span class="sm na">코인 중간값</span><b>${f1(K.med)}</b><span class="sm">${K.n}개</span></div>
-   <div class="tile"><span class="sm na">USDT</span><b>${Math.round(K.fx).toLocaleString()}원</b><span class="sm">업비트 기준</span></div></div>
-   ${row(hi,"김프 높음")}<div style="height:4px"></div>${row(lo,"김프 낮음")}
-   <details class="rule"><summary>뜻 보기</summary><ul><li>김프 = 업비트 원화가 ÷ (해외 달러가 × 업비트 USDT 가격) − 1</li><li>BTC 김프 +5% 이상: 국내 매수 과열 (고점 신호로 쓰이기도 함) · 0 이하(역프): 국내 관심 식음</li><li>특정 코인만 김프가 높으면 업비트 단독 수급(펌핑·입출금 막힘)일 수 있음 → 해외 가격과 함께 확인</li></ul></details></div>`;
+function fundBox(){
+  const F=D.fund;if(!F)return `<div class="box"><h3>펀딩비</h3><p class="sm na">선물 데이터를 받으면 표시됩니다</p></div>`;
+  const fv=v=>v==null?'<span class="na">—</span>':`<span class="fv ${v>=0.03?"hot":v<0?"neg":""}">${v>=0?"+":""}${v.toFixed(3)}%</span>`;
+  const tr=r=>r.d1==null||r.d7==null?"":r.d1>r.d7+0.003?'<span class="dn">▲ 오르는 중</span>':r.d1<r.d7-0.003?'<span class="up">▼ 내리는 중</span>':'<span class="na">= 비슷</span>';
+  const sp=v=>{if(!v||v.length<2)return "";const W=90,H=22,lo=Math.min(...v,0),hi=Math.max(...v,0.01),X=i=>i/(v.length-1)*W,Y=x=>H-2-(x-lo)/(hi-lo||1)*(H-4);
+    return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="vertical-align:middle"><line x1="0" x2="${W}" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}" stroke="var(--line)"/><polyline points="${v.map((x,i)=>X(i).toFixed(1)+","+Y(x).toFixed(1)).join(" ")}" fill="none" stroke="var(--amber)" stroke-width="1.5"/></svg>`;};
+  const rows=[["BTC",F.maj.BTC],["ETH",F.maj.ETH],["SOL",F.maj.SOL],[`알트 중간값`,F.mk]];
+  const m=F.mk.now,vd=m==null?["bal","—"]:m>=0.03?["lev","롱 과열"]:m<0?["spot","숏 우세"]:["bal","보통"];
+  return `<div class="box"><div class="bh"><h3>펀딩비</h3><span class="spc ${vd[0]}">${vd[1]}</span><span class="sm na">8시간 기준</span></div>
+   <div class="tbl ftab"><table><thead><tr><th style="text-align:left"></th><th>지금</th><th>1일</th><th>7일</th><th>30일</th><th>추세</th><th class="bcol">30일 흐름</th></tr></thead><tbody>
+   ${rows.map(([n,r])=>`<tr><td>${n}</td><td class="num">${fv(r.now)}</td><td class="num">${fv(r.d1)}</td><td class="num">${fv(r.d7)}</td><td class="num">${fv(r.d30)}</td><td class="sm">${tr(r)}</td><td class="bcol">${sp(r.ser)}</td></tr>`).join("")}</tbody></table></div>
+   <p class="sm" style="margin:8px 0 0">${m==null?"":m>=0.03?"롱이 몰려 펀딩이 높음 → 작은 하락에도 롱 청산이 연쇄될 수 있음":m<0?"숏이 우세 → 가격이 버티면 숏 청산(숏 스퀴즈)으로 급등할 수 있음":"기본값(0.01%) 근처 → 한쪽 쏠림 없음"}</p>
+   <details class="rule"><summary>뜻 보기</summary><ul><li>펀딩비 = 선물 롱이 숏에게 8시간마다 내는 비용. 기본값 +0.01%</li><li><span class="fv hot">+0.03% 이상</span> 롱 과열 · <span class="fv neg">0 미만</span> 숏 우세</li><li>BTC·ETH·SOL = OKX·Bitget 기록의 하루 평균, 지금 = Hyperliquid·Bitget·OKX 미결제약정 가중 평균. 알트 중간값 = 추적 코인 ${F.n}개의 중간값 (하루 1칸씩 기록)</li><li>바이낸스·바이비트는 GitHub 서버에서 접속이 막혀 빠짐</li></ul></details></div>`;
 }
 function levBox(){
-  const S=D.spmk;if(!S||!S.ser||!S.ser.length)return `<div class="box"><h3>레버리지 온도</h3><p class="sm na">기록이 쌓이면 표시됩니다</p></div>`;
-  const ser=S.ser.slice(-60),now=ser[ser.length-1][1],wk=ser.length>7?ser[ser.length-8][1]:null;
-  const st=now>=TH.sp_lev?["lev","과열"]:now>=TH.sp_spot*1.5?["bal","보통"]:["spot","현물 주도"];
-  return `<div class="box"><div class="bh"><h3>레버리지 온도</h3><span class="spc ${st[0]}">${st[1]}</span></div>
-   <div class="tiles"><div class="tile"><span class="sm na">선물 ÷ 현물 (중간값)</span><b>${now.toFixed(1)}배</b><span class="sm">${wk?`1주 전 ${wk.toFixed(1)}배`:""}</span></div>
-   <div class="tile no"><span class="sm na">선물 과열 코인</span><b>${S.lev}</b><span class="sm">추적 ${S.n}개 중</span></div>
-   <div class="tile ok"><span class="sm na">현물 주도 코인</span><b>${S.spot}</b><span class="sm">추적 ${S.n}개 중</span></div></div>
-   ${lineChart("lev",ser.map(x=>x[0]),[{n:"배율",v:ser.map(x=>x[1]),col:"var(--amber)"}],{fmt:v=>v.toFixed(1)+"배",W:980,H:200,refs:[{y:TH.sp_spot,label:"현물 주도"},{y:TH.sp_lev,label:"과열"}],ylab:"선물/현물 거래량 배율 추이"})}
-   <details class="rule"><summary>뜻 보기</summary><ul><li>배율 = 선물 거래량 ÷ 현물 거래량 (선물: Hyperliquid·Bitget·OKX, 현물: Bitget·OKX USDT 마켓 + 업비트 원화)</li>
-   <li>배율이 오르며 가격도 오르면 레버리지가 끌어올리는 장 → 청산 연쇄로 급락하기 쉬움. 현물이 이끄는 상승이 더 오래 감</li>
-   <li>코인별: ${TH.sp_spot}배 미만이면 <span class="spc spot">현물 주도</span>, ${TH.sp_lev}배 이상이면서 7일 새 ${TH.sp_jump}배 이상 오르면 <span class="spc lev">선물 과열</span></li>
-   <li>바이낸스·바이비트가 빠져 실제보다 배율이 낮게 나옴 → 숫자보다 <b>변화 방향</b>을 보세요</li></ul></details></div>`;
+  const S=D.spmk;if(!S||!S.ser||!S.ser.length)return `<div class="box"><h3>선물 쏠림</h3><p class="sm na">기록이 쌓이면 표시됩니다</p></div>`;
+  const ser=S.ser.slice(-60),now=ser[ser.length-1][1],wk=ser.length>7?ser[ser.length-8][1]:null,MX=8,pos=v=>Math.min(v,MX)/MX*100;
+  const st=now>=TH.sp_lev?["lev","과열"]:now>=TH.sp_spot?["bal","보통"]:["spot","현물 주도"];
+  const hot=C.filter(c=>c.sp&&c.sp.st==="lev"&&shown(c)).sort((a,b)=>b.sp.r-a.sp.r).slice(0,5);
+  return `<div class="box"><div class="bh"><h3>선물 쏠림</h3><span class="spc ${st[0]}">${st[1]}</span></div>
+   <p style="margin:0 0 2px;font-size:.92rem">선물 거래가 현물의 <b>${now.toFixed(1)}배</b>${wk?` · 1주 전 ${wk.toFixed(1)}배보다 <b class="${now>wk?"dn":"up"}">${now>wk?"늘어남 (과열 쪽)":"줄어듦 (진정)"}</b>`:""}</p>
+   <div class="lgw"><div class="lg"><i style="width:${TH.sp_spot/MX*100}%;background:color-mix(in srgb,var(--up) 55%,transparent)"></i><i style="width:${(TH.sp_lev-TH.sp_spot)/MX*100}%;background:var(--bg3)"></i><i style="flex:1;background:color-mix(in srgb,var(--amber) 60%,transparent)"></i></div>
+   <span class="lgm" style="left:${pos(now)}%">지금 ${now.toFixed(1)}배</span>${wk?`<span class="lgm ghost" style="left:${pos(wk)}%">1주 전</span>`:""}</div>
+   <div class="lgl"><span>현물 주도 (${TH.sp_spot}배 미만)</span><span>보통</span><span>과열 (${TH.sp_lev}배 이상)</span></div>
+   ${hot.length?`<div class="chips" style="margin-top:10px"><span class="sm na">선물 과열 코인</span>${hot.map(c=>`<span class="chip" data-coin="${c.id}" style="cursor:pointer">${esc(c.s)} ${c.sp.r.toFixed(1)}배</span>`).join("")}</div>`:""}
+   <details class="rule"><summary>뜻 · 추이 보기</summary><ul><li>추적 코인들의 (선물 거래량 ÷ 현물 거래량) 중간값. 높을수록 빌린 돈(레버리지)으로 거래하는 비중이 큼 → 급락·청산 위험</li><li>선물: Hyperliquid·Bitget·OKX, 현물: Bitget·OKX + 업비트. 바이낸스·바이비트가 빠져 실제보다 낮게 나옴 → 방향을 보세요</li></ul>
+   ${lineChart("lev",ser.map(x=>x[0]),[{n:"배율",v:ser.map(x=>x[1]),col:"var(--amber)"}],{fmt:v=>v.toFixed(1)+"배",W:980,H:180,refs:[{y:TH.sp_spot,label:"현물 주도"},{y:TH.sp_lev,label:"과열"}],ylab:"선물/현물 배율 추이"})}</details></div>`;
 }
 function renderLvl(){
   document.getElementById("p-lvl").innerHTML=`<p class="lead">BTC가 끌려갈 가격대(청산이 몰린 곳)와 알트 흐름의 분기점(도미넌스·TOTAL3 지지·저항)을 한 곳에서 봅니다.</p><div class="grid2">${liqBox()}${lvlBox()}</div>`;
@@ -3114,7 +3195,7 @@ function renderChk(){
   const AUD=[["순위","a","b",`가격·거래량은 CoinGecko, 이평·RSI는 거래소 일봉. <b>이미 오른 코인 목록</b>이라 추격용이 아님. 경보 칩은 맞았음: 익절 구간 ${w(L.tp)}, 꺾임 주의 ${w(L.fall)}`,"베타 열 추가"],
    ["섹터","b","b",`4.2까지 코인 섹터가 매번 바뀌어 추천 이력 107개 중 36개가 엉뚱한 섹터로 표시됨. 순환 후보 섹터 ${w(Q.rotsec)}, '개선' 상태만으론 ${w(Q.q_imp)}`,"본적 섹터 고정, 기능 섹터 6개 추가"],
    ["추천","b","c",`Top 3 (4.0) ${w(L.top)} · 대조군(3.0 방식) ${w(L.lag30)} → <b>4.0 규칙이 대조군보다 나쁨</b> (차이가 표본 오차 범위 안이라 확정은 아님). 초입 후보 ${w(L.early)}`,"체급별(소형·중형·대형) Top 3, 매출·베타·선물/현물·유통 비율 반영, 알트시즌 필터, 대조군은 기록만"],
-   ["청산·레벨","b","b","청산맵은 추정치 (바이낸스·바이비트 제외). 지지·저항은 자체 기록 30일 뒤부터","새 탭"],
+   ["청산 / 도미넌스","b","b","청산맵은 추정치 (바이낸스·바이비트 제외). 지지·저항은 자체 기록 30일 뒤부터","새 탭"],
    ["상장","a","b","공지는 거래소 원문. 상장 후보는 아직 채점 안 함","—"],
    ["시장","b","a",`알트시즌 지수 50~75 구간 Top 3 ${w(A["50~75"])} vs 25~50 구간 ${w(A["25~50"])} → <b>가장 쓸모 있는 필터</b>. 8단계 사이클 기준값은 미검증, 도미넌스 기록은 9/23부터`,"알트시즌 지수를 추천 필터로"],
    ["성적표","b","b","백테스트는 지금 살아남은 코인으로만 계산 → 실제보다 좋게 나옴 (생존 편향). 기간 약 11개월. 실전 기록은 편향 없음","매일 코인 명단 저장, 백테스트도 본적 섹터로"]];
@@ -3137,10 +3218,10 @@ function renderChk(){
 
 /* 용어 */
 const GLOS=[["보는 법",[["%p (퍼센트포인트)","수익률끼리의 차이. 코인 +12%, 시장 +8%면 시장 대비 <b>+4%p</b>"],["승률","7일 뒤 <b>시장보다 더 오른</b> 비율. 50%면 동전 던지기 수준"],["중간값","가운데 값. 한두 개 대박에 안 흔들려 평균보다 실제 체감에 가까움"],["체급","시총 기준. 메이저 $10B+ · 대형 $1~10B · 중형 $300M~1B · 소형 $70~300M"],["본적 섹터","코인마다 하나로 고정한 대표 섹터. 여러 섹터에 속해도 기능(밈·DEX 등) 우선"]]],
- ["움직임",[["베타","시장이 1% 움직일 때 이 코인이 움직인 정도 (최근 60일). <b>1.5</b>면 시장 +10%에 +15%, −10%에 −15%. 오를 땐 좋고 빠질 땐 더 아픔"],["RSI","최근 14일 오른 힘 ÷ 내린 힘을 0~100으로. <b>75↑ 과열</b>, 30↓ 과매도"],["이평선 (20·60·100·200일)","최근 N일 종가 평균. 가격이 위면 상승 흐름. 20일선 = 단기, 200일선 = 장기"],["덜 오름","같은 섹터 안에서 30일 수익률이 평균보다 뒤처짐 (표준점수 −0.5 이하)"]]],
+ ["움직임",[["움직임 크기 (베타)","화면에는 안 보이고 점수에만 씀. 시장이 1% 움직일 때 이 코인이 움직인 정도 (최근 60일). <b>1.5</b>면 시장 +10%에 +15%, −10%에 −15%. 오를 땐 좋고 빠질 땐 더 아픔"],["RSI","최근 14일 오른 힘 ÷ 내린 힘을 0~100으로. <b>75↑ 과열</b>, 30↓ 과매도"],["이평선 (20·60·100·200일)","최근 N일 종가 평균. 가격이 위면 상승 흐름. 20일선 = 단기, 200일선 = 장기"],["덜 오름","같은 섹터 안에서 30일 수익률이 평균보다 뒤처짐 (표준점수 −0.5 이하)"]]],
  ["섹터 순환",[["RRG","섹터를 두 축으로 찍은 지도. 가로 = 상대강도, 세로 = 모멘텀"],["상대강도","섹터 ÷ 시장을 최근 20일 평균과 비교. <b>100 위 = 시장보다 강함</b>"],["모멘텀","상대강도가 최근 5일간 오르는 중인지. 100 위 = 강해지는 중"],["4상태","개선(돈 들어오기 시작) → 주도(돈 들어옴) → 둔화(빠지는 중) → 소외(안 들어옴) 순으로 돎"],["순환 후보","개선 상태 + 30일 아직 덜 오름 + 확인 신호 2개 이상. Top 3는 여기서만 뽑음"]]],
  ["돈·매출",[["매출 (Revenue)","프로토콜이 가져간 수수료 (DefiLlama). 이용자가 낸 수수료 전체가 아니라 프로토콜 몫"],["보유자 몫","매출 중 바이백·소각·분배로 토큰 보유자에게 간 금액"],["유통 비율","시총 ÷ FDV(최대 공급량 기준 시총) = 지금 풀려 있는 비율. <b>50%면 절반이 아직 안 풀림</b> → 풀릴 때마다 매도 압력. 30% 미만은 추천 제외, 30~50%는 감점"],["P/S","시총 ÷ 연 매출. <b>낮을수록 벌어들이는 돈에 비해 쌈</b>. 15 미만 가점, 100 넘으면 감점"],["매출 해당 없음","밈·체인 코인 등은 매출 집계 대상이 아니라 가점도 감점도 없음"]]],
- ["선물·시장",[["선물/현물 배율","선물 거래량 ÷ 현물 거래량. 현물 주도(초록) = 실제로 사는 돈이 끌어올림, 선물 과열(주황) = 레버리지가 끌어올림 → 청산 위험"],["펀딩","선물 롱·숏 균형 비용 (연 환산). 높으면 롱 과열, 0 이하면 숏 우세"],["OI (미결제약정)","아직 안 닫힌 선물 포지션 총액. 가격은 그대로인데 OI↑ = 새 포지션이 쌓임"],["숏 스퀴즈","숏이 몰렸는데 가격이 버티면, 숏 손절(청산)이 가격을 밀어 올림"],["청산맵","가격대별로 강제 청산될 물량 추정. 가격은 청산이 몰린 곳으로 끌려가는 경우가 많음"],["도미넌스 (BTC.D)","전체 시총 중 BTC 비율. 내려가면 돈이 알트로"],["TOTAL3","전체 시총 − BTC − ETH = 알트 전체 크기"],["알트시즌 지수","상위 50개 알트 중 최근 90일 BTC보다 더 오른 비율. 50~75일 때 Top 3 성적이 가장 좋았음"],["지지 · 저항","과거에 여러 번 멈춘 가격대. 아래 = 지지, 위 = 저항"],["생존 편향","지금 살아남은 코인만으로 과거를 시험하면, 사라진 코인이 빠져 성적이 좋게 나오는 착시"]]]];
+ ["선물·시장",[["선물/현물 배율","선물 거래량 ÷ 현물 거래량. 현물 주도(초록) = 실제로 사는 돈이 끌어올림, 선물 과열(주황) = 레버리지가 끌어올림 → 청산 위험"],["펀딩비","선물 롱이 숏에게 8시간마다 내는 비용. 기본 +0.01%, +0.03% 이상 롱 과열, 0 미만 숏 우세"],["총점","덜 오름·거래량·섹터·매출 등 항목 점수의 합. 35 이상 강, 20 이상 보통. 추천은 체급마다 총점 순"],["국면","BTC 주도 · 알트 확산 · 알트 과열 · 하락·관망 중 하나. BTC 50일선과 알트시즌 지수로 판정"],["OI (미결제약정)","아직 안 닫힌 선물 포지션 총액. 가격은 그대로인데 OI↑ = 새 포지션이 쌓임"],["숏 스퀴즈","숏이 몰렸는데 가격이 버티면, 숏 손절(청산)이 가격을 밀어 올림"],["청산맵","가격대별로 강제 청산될 물량 추정. 가격은 청산이 몰린 곳으로 끌려가는 경우가 많음"],["도미넌스 (BTC.D)","전체 시총 중 BTC 비율. 내려가면 돈이 알트로"],["TOTAL3","전체 시총 − BTC − ETH = 알트 전체 크기"],["알트시즌 지수","상위 50개 알트 중 최근 90일 BTC보다 더 오른 비율. 50~75일 때 Top 3 성적이 가장 좋았음"],["지지 · 저항","과거에 여러 번 멈춘 가격대. 아래 = 지지, 위 = 저항"],["생존 편향","지금 살아남은 코인만으로 과거를 시험하면, 사라진 코인이 빠져 성적이 좋게 나오는 착시"]]]];
 const FLOW=[["2시간마다 자동 실행","GitHub Actions가 monitor.py를 돌림 (서버·비용 없음). 약 1~5분"],
  ["데이터 받기","CoinGecko·거래소·업비트·DefiLlama 등에서 가격·일봉·선물·매출을 받음 (아래 표). 일부는 하루 1번만 받고 나머지 시간엔 저장해 둔 값 사용"],
  ["코인 거르기","시총 상위 1000개 중 섹터에 속하고 시총 $70M 이상, 스테이블·래핑 토큰 제외 → 추적 코인"],
@@ -3157,7 +3238,7 @@ const SRCT=[["가격·시총·거래량","CoinGecko","2시간","시총 상위 10
  ["유통 비율","CoinGecko","2시간","시총 ÷ FDV"],
  ["토큰 이미지","CoinGecko","2시간","시총 목록에 들어 있는 이미지 주소"],
  ["매출·P/S","DefiLlama","하루 1번","30일 프로토콜 매출, 전월 대비, P/S = 시총 ÷ (30일 매출 × 12.2)"],
- ["김프","업비트 시세 + CoinGecko","2시간","업비트 원화가 ÷ (달러가 × USDT 원화가) − 1"],
+ ["펀딩비","OKX·Bitget 기록 + 선물 3곳","2시간","8시간 펀딩 하루 평균, 지금·1일·7일·30일"],
  ["업비트 관심·상장","업비트·빗썸·바이낸스 공지","2시간 / 하루 1번","원화 거래대금이 평소(4일+) 대비 2배↑ = 업비트 관심"],
  ["도미넌스·TOTAL3·지지저항","CoinGecko 전체 시총","2시간 (쌓아서 계산)","TOTAL3 = 전체 − BTC − ETH. 지지·저항 = 180일 스윙 고저점 묶음"],
  ["청산맵","OKX·Bitget·Hyperliquid BTC OI","2시간 (쌓아서 계산)","OI 증가분 × 레버리지 가정 → 청산 가격 추정"],
@@ -3174,7 +3255,7 @@ const STN={ok:"정상",warn:"지연",fail:"끊김",off:"꺼짐"};
 const ago=h=>h==null?"—":h<1?`${Math.max(1,Math.round(h*60))}분 전`:h<48?`${Math.round(h)}시간 전`:`${Math.round(h/24)}일 전`;
 function srcTable(){
   const L=[...(D.srcst||[])];
-  const gcRow={n:"GoatCounter",u:"https://www.goatcounter.com",w:"오늘 방문자 수 (브라우저가 직접 조회)",st:D.visit?"ok":!D.gc?"off":VIS===true?"ok":VIS===false?"fail":"warn",m:!D.gc?"계정 없음":VIS===false?"조회 실패 (Settings에서 방문자 수 공개 허용 확인)":VIS==null&&!D.visit?"확인 중":"",age:null,per:-1};
+  const gcRow={n:"GoatCounter",u:"https://www.goatcounter.com",w:"오늘 방문자 수 (브라우저가 직접 조회)",st:D.visit?"ok":!D.gc?"off":VIS===true?"ok":VIS===false?"fail":"warn",m:!D.gc?"계정 없음":VIS===false?"조회 실패: GoatCounter → Settings → 'Allow using the visitor counter' 체크 필요 (꺼져 있으면 403). 광고 차단기도 막을 수 있음":VIS==null&&!D.visit?"확인 중":"",age:null,per:-1};
   L.push(gcRow);
   const cnt=k=>L.filter(x=>x.st===k).length;
   return `<div class="stsum">${["ok","warn","fail","off"].map(k=>`<span><i class="dot ${k}"></i>${STN[k]} <b>${cnt(k)}</b></span>`).join("")}</div>
@@ -3202,10 +3283,9 @@ function openCoin(id){
   <div class="kv num"><span>RSI(14) · 거래소 나이</span><span>${c.rsi==null?"—":c.rsi.toFixed(0)} · ${c.age==null?"210일+":c.age+"일"}</span></div>
   <div class="kv num"><span>선물 ÷ 현물 거래량</span><span>${c.sp?`${spChip(c,true)} <span class="na">7일 전 ${c.sp.r7?c.sp.r7+"배":"—"} · 선물 ${usd(c.sp.p)} · 현물 ${usd(c.sp.s)}</span>`:'<span class="na">선물 미상장 또는 거래량 없음</span>'}</span></div>
   <div class="kv num"><span>유통 비율 (시총 ÷ FDV)</span><span>${c.float==null?'<span class="na">—</span>':`<span class="${c.float<TH.float_min?"dn":c.float<TH.float_warn?"":"up"}">${Math.round(c.float*100)}%</span> <span class="na">${c.float<TH.float_min?"추천 제외":c.float<TH.float_warn?"감점 · 풀릴 물량 많음":"양호"}</span>`}</span></div>
-  <div class="kv num"><span>업비트 김프</span><span>${c.kimp==null?'<span class="na">업비트 원화 마켓 없음</span>':`<span class="${c.kimp>=5?"dn":""}">${f1(c.kimp)}</span> <span class="na">(시장 중간값 ${f1((D.kimp||{}).med)})</span>`}</span></div>
   <div class="kv num"><span>거래량</span><span>${usd(c.vol)} · 최근 3일 ${c.vx==null?"—":c.vx.toFixed(1)+"배"}</span></div>
-  <div class="kv num"><span>베타 (60일)</span><span>${c.beta==null?"—":c.beta.toFixed(2)+(c.beta>=1.3?" · 시장보다 크게 움직임":c.beta<0.7?" · 시장보다 덜 움직임":"")}</span></div>
-  <div class="kv num"><span>추천 점수</span><span><b>${c.score5.toFixed(0)}</b>${c.rb?` <span class="na">(매출 ${c.rb>0?"+":""}${c.rb})</span>`:""}</span></div>
+
+  <div class="kv num"><span>총점</span><span><span class="sig ${sigLv(c)[0]}">${sigLv(c)[1]}</span> <b>${c.score5.toFixed(0)}</b></span></div>${scList(c)}
   <h4>현물 · 선물 거래량 (7일)</h4>${spChart(c)}
   <h4>관련 코인 · 같은 섹터 (${esc(s.n)}, 시총 순)</h4><div class="rel">${peers.map(x=>relRow(x,usd(x.mc))).join("")||'<span class="sm na">없음</span>'}</div>
   <h4>같이 움직인 코인 <span class="na">(60일 하루 수익률 상관)</span></h4><div class="rel">${co.map(([x,r])=>relRow(x,"상관 "+r.toFixed(2))).join("")||'<span class="sm na">기록 부족</span>'}</div>
@@ -3242,7 +3322,7 @@ let VIS=null;
 function showVisit(t,y){const v=document.getElementById("visit");v.innerHTML=`오늘 방문 <b>${t}</b>${y!=null?` <span class="na">· 어제 ${y}</span>`:""}`;v.hidden=false;}
 if(D.visit)showVisit(D.visit.today,D.visit.yday);
 else if(D.gc){const td=new Date(Date.now()+9*3600e3).toISOString().slice(0,10);
-  fetch(`https://${D.gc}.goatcounter.com/counter/TOTAL.json?start=${td}`).then(r=>r.ok?r.json():null).then(j=>{VIS=!!(j&&j.count_unique!=null);if(VIS)showVisit(j.count_unique,null);renderChk();}).catch(()=>{VIS=false;renderChk();});}
+  fetch(`https://${D.gc}.goatcounter.com/counter/TOTAL.json?start=${td}`).then(r=>r.ok?r.json():null).then(j=>{VIS=!!(j&&(j.count_unique!=null||j.count!=null));if(VIS)showVisit(j.count_unique||j.count,null);renderChk();}).catch(()=>{VIS=false;renderChk();});}
 function renderAll(){renderRegime();renderTabs();renderFilt();renderHome();renderEarly();renderList();renderSec();renderMkt();renderLvl();renderChk();renderGlos();}
 renderAll();
 """
